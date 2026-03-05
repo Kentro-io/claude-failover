@@ -287,6 +287,19 @@ async function cmdSetup(args) {
     } else {
       error(result.message);
     }
+    // Also start the proxy now if not already running
+    const status = getDaemonStatus();
+    if (!status.running) {
+      const startResult = startDaemon();
+      if (startResult.success) {
+        success(`Proxy started (PID ${startResult.pid})`);
+      } else {
+        warn(`Could not start proxy: ${startResult.message}`);
+        info('Try: claude-failover start -d');
+      }
+    } else {
+      info(`Proxy already running (PID ${status.pid})`);
+    }
     return;
   }
 
