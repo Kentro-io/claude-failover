@@ -2,17 +2,13 @@
 
 Anthropic API proxy with automatic key rotation, model fallback, and a local web dashboard.
 
-```
-npx claude-failover → proxy at localhost:4080 with web UI
-```
-
 Hit rate limits? Claude Failover automatically rotates through your API keys and falls back to cheaper models — zero client changes needed.
 
 ## Quick Start
 
 ```bash
-# Install globally
-npm install -g claude-failover
+# Install globally from GitHub
+npm install -g Kentro-io/claude-failover
 
 # Start the proxy
 claude-failover start
