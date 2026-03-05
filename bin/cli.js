@@ -283,22 +283,10 @@ async function cmdSetup(args) {
     const result = installLaunchAgent();
     if (result.success) {
       success(`LaunchAgent installed: ${result.path}`);
-      info('Proxy will start automatically on login');
+      success('Proxy is now running and will stay running (auto-restarts on crash/login)');
+      info(`Dashboard: http://localhost:${port}/dashboard`);
     } else {
       error(result.message);
-    }
-    // Also start the proxy now if not already running
-    const status = getDaemonStatus();
-    if (!status.running) {
-      const startResult = startDaemon();
-      if (startResult.success) {
-        success(`Proxy started (PID ${startResult.pid})`);
-      } else {
-        warn(`Could not start proxy: ${startResult.message}`);
-        info('Try: claude-failover start -d');
-      }
-    } else {
-      info(`Proxy already running (PID ${status.pid})`);
     }
     return;
   }

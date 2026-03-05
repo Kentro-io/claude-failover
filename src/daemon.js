@@ -3,7 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const { PID_PATH, CONFIG_DIR } = require('./config');
 
 function writePid(pid) {
@@ -127,12 +127,23 @@ function installLaunchAgent() {
   }
 
   fs.writeFileSync(plistPath, plist);
+
+  // Load immediately so the proxy starts right now (not just on next login)
+  try {
+    // Unload first in case an old version is loaded
+    try { execSync(`launchctl unload "${plistPath}" 2>/dev/null`); } catch {}
+    execSync(`launchctl load "${plistPath}"`);
+  } catch {
+    // Non-fatal — user can load manually
+  }
+
   return { success: true, path: plistPath };
 }
 
 function uninstallLaunchAgent() {
   const plistPath = getLaunchAgentPath();
   try {
+    try { execSync(`launchctl unload "${plistPath}" 2>/dev/null`); } catch {}
     fs.unlinkSync(plistPath);
     return { success: true };
   } catch {
