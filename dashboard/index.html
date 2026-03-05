@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Failover — Dashboard</title>
+  <link rel="stylesheet" href="/dashboard/style.css">
+</head>
+<body>
+  <div class="app">
+    <nav class="sidebar">
+      <div class="logo">
+        <span class="logo-icon">⚡</span>
+        <span class="logo-text">Claude Failover</span>
+      </div>
+      <div class="nav-items">
+        <a class="nav-item active" data-page="status">
+          <span class="nav-icon">◉</span> Status
+        </a>
+        <a class="nav-item" data-page="keys">
+          <span class="nav-icon">🔑</span> API Keys
+        </a>
+        <a class="nav-item" data-page="profiles">
+          <span class="nav-icon">👤</span> Profiles
+        </a>
+        <a class="nav-item" data-page="fallback">
+          <span class="nav-icon">↻</span> Fallback
+        </a>
+        <a class="nav-item" data-page="setup">
+          <span class="nav-icon">⚙</span> Setup
+        </a>
+        <a class="nav-item" data-page="logs">
+          <span class="nav-icon">📋</span> Logs
+        </a>
+      </div>
+      <div class="sidebar-footer">
+        <div class="connection-status" id="connectionStatus">
+          <span class="status-dot"></span>
+          <span class="status-text">Connecting...</span>
+        </div>
+      </div>
+    </nav>
+    <main class="content" id="content">
+      <!-- Pages rendered by app.js -->
+    </main>
+  </div>
+  <script src="/dashboard/app.js"></script>
+</body>
+</html>
