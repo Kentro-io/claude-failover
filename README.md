@@ -8,20 +8,19 @@ Hit rate limits? Claude Failover automatically rotates through your API keys and
 
 ```bash
 # Install globally from GitHub
-npm install -g Kentro-io/claude-failover
+sudo npm install -g Kentro-io/claude-failover
 
-# Start the proxy
-claude-failover start
-
-# Add your first API key
+# Add your API keys
 claude-failover add-key sk-ant-api03-... "Personal Account"
 
-# Auto-configure your tools
-claude-failover setup
+# Auto-configure your tools + install autostart (macOS LaunchAgent)
+claude-failover setup --autostart
 
 # Open the dashboard
 open http://localhost:4080/dashboard
 ```
+
+> **Auto-start:** Run `claude-failover setup --autostart` once to install a macOS LaunchAgent. The proxy will start automatically on login — no need to manually run `start` again. To run manually instead: `claude-failover start -d` (daemon) or `claude-failover start` (foreground).
 
 ## How It Works
 
