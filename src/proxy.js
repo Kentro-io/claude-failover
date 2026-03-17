@@ -135,7 +135,7 @@ async function handleProxyRequest(req, res, profileName) {
           const retryAfter = parseInt(proxyRes.headers['retry-after'], 10) || null;
           // Set per-model cooldown only (not blanket key — rate limits are per-model)
           const cooldownSec = retryAfter || 30; // 30s default, not 1 hour
-          const cd = cooldown.setCooldown(keyId, model, cooldownSec, config.cooldownMs);
+          const cd = cooldown.setCooldown(keyId, model, cooldownSec, 60000); // max 60s for 429
           metrics.recordRetry();
           await consumeResponse(proxyRes);
           log('warn', '429 rate limited', {
@@ -165,7 +165,7 @@ async function handleProxyRequest(req, res, profileName) {
 
         if (proxyRes.statusCode === 401 || proxyRes.statusCode === 403) {
           // Auth failure — skip this key entirely (blanket cooldown)
-          cooldown.setCooldown(keyId, null, 300, config.cooldownMs);
+          cooldown.setCooldown(keyId, null, 300, 300000); // auth errors: 5 min max
           await consumeResponse(proxyRes);
           log('warn', `${proxyRes.statusCode} auth error — blanket cooldown`, {
             key: keyId, model

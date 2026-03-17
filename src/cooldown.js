@@ -28,7 +28,7 @@ function isInCooldown(keyId, model) {
 }
 
 function setCooldown(keyId, model, retryAfterSec, defaultCooldownMs) {
-  const maxCooldownMs = defaultCooldownMs || 300000; // 5 min max, not 1 hour
+  const maxCooldownMs = Math.min(defaultCooldownMs || 300000, 300000); // hard cap 5 min regardless of config
   const durationMs = retryAfterSec
     ? Math.min(retryAfterSec * 1000, maxCooldownMs)
     : Math.min(30000, maxCooldownMs); // 30s default if no retry-after
