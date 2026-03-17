@@ -9,6 +9,10 @@ const metrics = require('./metrics');
 
 const UPSTREAM = 'https://api.anthropic.com';
 
+// Server error status codes that are retryable
+const RETRYABLE_SERVER_ERRORS = new Set([500, 502, 503]);
+const MAX_SERVER_ERROR_RETRIES = 3;
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -98,14 +102,52 @@ async function handleProxyRequest(req, res, profileName) {
   const originalModel = parsedBody?.model;
   const startTime = Date.now();
 
-  // Build model chain: requested -> fallback
+  // ── Non-model requests: passthrough with first available key, no fallback ──
+  if (!originalModel) {
+    const firstKeyId = keyOrder.find(id => config.keys[id]?.token);
+    if (!firstKeyId) {
+      res.writeHead(502, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'No keys configured' }));
+      return;
+    }
+    try {
+      const proxyRes = await proxyRequest(
+        req.url, req.method, req.headers, body, config.keys[firstKeyId].token
+      );
+      const responseHeaders = {};
+      for (const [k, v] of Object.entries(proxyRes.headers)) {
+        responseHeaders[k] = v;
+      }
+      res.writeHead(proxyRes.statusCode, responseHeaders);
+      proxyRes.pipe(res);
+    } catch (err) {
+      if (!res.headersSent) {
+        res.writeHead(502, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Upstream connection failed' }));
+      }
+    }
+    return;
+  }
+
+  // ── Build model chain: follow fallback links (multi-hop with cycle detection) ──
   const modelChain = [originalModel];
-  if (originalModel && config.modelFallback && config.modelFallback[originalModel]) {
-    modelChain.push(config.modelFallback[originalModel]);
+  if (config.modelFallback) {
+    let current = originalModel;
+    const seen = new Set([current]);
+    while (config.modelFallback[current]) {
+      const next = config.modelFallback[current];
+      if (seen.has(next)) break; // cycle detection
+      seen.add(next);
+      modelChain.push(next);
+      current = next;
+      if (modelChain.length >= 5) break; // cap depth
+    }
   }
 
   let lastError = null;
   let attempted = 0;
+  let serverErrorRetries = 0;
+  let lastServerErrorStatus = null;
 
   for (const model of modelChain) {
     const isModelFallback = model !== originalModel;
@@ -133,9 +175,8 @@ async function handleProxyRequest(req, res, profileName) {
 
         if (proxyRes.statusCode === 429) {
           const retryAfter = parseInt(proxyRes.headers['retry-after'], 10) || null;
-          // Set per-model cooldown only (not blanket key — rate limits are per-model)
-          const cooldownSec = retryAfter || 30; // 30s default, not 1 hour
-          const cd = cooldown.setCooldown(keyId, model, cooldownSec, 60000); // max 60s for 429
+          const cooldownSec = retryAfter || 30;
+          const cd = cooldown.setCooldown(keyId, model, cooldownSec, 60000);
           metrics.recordRetry();
           await consumeResponse(proxyRes);
           log('warn', '429 rate limited', {
@@ -146,7 +187,6 @@ async function handleProxyRequest(req, res, profileName) {
         }
 
         if (proxyRes.statusCode === 529) {
-          // 529 = server overload, not account-specific. Short cooldown, try next key.
           cooldown.setCooldown(keyId, model, 10, 30000);
           metrics.recordRetry();
           await consumeResponse(proxyRes);
@@ -155,7 +195,6 @@ async function handleProxyRequest(req, res, profileName) {
         }
 
         if (proxyRes.statusCode === 404) {
-          // 404 = key doesn't have access to this model/endpoint, try next key
           await consumeResponse(proxyRes);
           log('warn', '404 not found — key may lack model access', {
             key: keyId, model, path: req.url
@@ -164,8 +203,7 @@ async function handleProxyRequest(req, res, profileName) {
         }
 
         if (proxyRes.statusCode === 401 || proxyRes.statusCode === 403) {
-          // Auth failure — skip this key entirely (blanket cooldown)
-          cooldown.setCooldown(keyId, null, 300, 300000); // auth errors: 5 min max
+          cooldown.setCooldown(keyId, null, 300, 300000);
           await consumeResponse(proxyRes);
           log('warn', `${proxyRes.statusCode} auth error — blanket cooldown`, {
             key: keyId, model
@@ -173,7 +211,27 @@ async function handleProxyRequest(req, res, profileName) {
           continue;
         }
 
-        // Success (or non-retryable error) — pipe through
+        // ── 500/502/503: retry up to 3 times across keys, then try model fallback ──
+        if (RETRYABLE_SERVER_ERRORS.has(proxyRes.statusCode)) {
+          serverErrorRetries++;
+          lastServerErrorStatus = proxyRes.statusCode;
+          metrics.recordRetry();
+          await consumeResponse(proxyRes);
+
+          if (serverErrorRetries >= MAX_SERVER_ERROR_RETRIES) {
+            log('warn', `${proxyRes.statusCode} server error — exhausted ${MAX_SERVER_ERROR_RETRIES} retries, trying model fallback`, {
+              key: keyId, model, retries: serverErrorRetries
+            });
+            break; // break key loop, try next model in fallback chain
+          }
+
+          log('warn', `${proxyRes.statusCode} server error (retry ${serverErrorRetries}/${MAX_SERVER_ERROR_RETRIES})`, {
+            key: keyId, model
+          });
+          continue; // try next key
+        }
+
+        // ── Success (or non-retryable error like 400) — pipe through ──
         const latency = Date.now() - startTime;
         metrics.recordSuccess(keyId, model);
 
@@ -194,7 +252,6 @@ async function handleProxyRequest(req, res, profileName) {
           fallback: isModelFallback ? `${originalModel} -> ${model}` : null
         });
 
-        // Build response headers
         const responseHeaders = {};
         for (const [k, v] of Object.entries(proxyRes.headers)) {
           responseHeaders[k] = v;
@@ -219,7 +276,7 @@ async function handleProxyRequest(req, res, profileName) {
     }
   }
 
-  // All keys exhausted
+  // All keys and models exhausted
   metrics.recordFailure();
   const latency = Date.now() - startTime;
 
@@ -228,11 +285,33 @@ async function handleProxyRequest(req, res, profileName) {
     path: req.url,
     model: originalModel || 'unknown',
     key: 'none',
-    status: 429,
+    status: lastServerErrorStatus || 429,
     latency,
     fallback: null,
-    error: 'all_keys_exhausted'
+    error: lastServerErrorStatus ? 'server_error_retries_exhausted' : 'all_keys_exhausted'
   });
+
+  // If we exhausted retries due to server errors, return 502 (not 429)
+  if (lastServerErrorStatus) {
+    log('error', 'SERVER ERROR RETRIES EXHAUSTED', {
+      profile: profileName,
+      originalModel,
+      attempted,
+      serverErrorRetries,
+      lastStatus: lastServerErrorStatus,
+      modelChain: modelChain.join(' -> ')
+    });
+
+    res.writeHead(502, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      type: 'error',
+      error: {
+        type: 'server_error',
+        message: `Proxy: upstream returned ${lastServerErrorStatus} after ${serverErrorRetries} retries across ${modelChain.length} model(s) [${modelChain.join(', ')}].`
+      }
+    }));
+    return;
+  }
 
   log('error', 'ALL KEYS AND MODELS EXHAUSTED', {
     profile: profileName,
@@ -246,7 +325,7 @@ async function handleProxyRequest(req, res, profileName) {
     type: 'error',
     error: {
       type: 'rate_limit_error',
-      message: `Proxy: all ${Object.keys(config.keys).length} keys exhausted across models [${modelChain.join(', ')}]. Cooldowns active for ~${Math.round((config.cooldownMs || 3600000) / 60000)}min. Last error: ${lastError?.message || 'rate_limit'}`
+      message: `Proxy: all ${Object.keys(config.keys).length} keys exhausted across models [${modelChain.join(', ')}]. Active cooldowns: ${Object.keys(cooldown.getActiveCooldowns()).length}. Last error: ${lastError?.message || 'rate_limit'}`
     }
   }));
 }

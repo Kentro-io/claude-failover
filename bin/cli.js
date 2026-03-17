@@ -63,6 +63,9 @@ function readStdin(prompt) {
       data = chunk.toString().trim();
       resolve(data);
     });
+    process.stdin.once('end', () => {
+      resolve(data.trim());
+    });
     process.stdin.resume();
   });
 }
