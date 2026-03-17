@@ -309,8 +309,8 @@ function renderKeys() {
 
 function renderKeyItem(k, index) {
   return `
-    <div class="key-item" draggable="true" data-key-id="${escAttr(k.id)}" data-index="${index}">
-      <span class="drag-handle">⠿</span>
+    <div class="key-item" data-key-id="${escAttr(k.id)}" data-index="${index}">
+      <span class="key-priority">${index + 1}</span>
       <div class="key-info">
         <div class="key-id">${escHtml(k.label)} <span class="text-muted text-sm">(${escHtml(k.id)})</span></div>
         <div class="key-meta">
@@ -327,67 +327,7 @@ function renderKeyItem(k, index) {
 }
 
 function setupDragDrop() {
-  const list = document.getElementById('keyList');
-  if (!list) return;
-
-  let dragItem = null;
-
-  list.querySelectorAll('.key-item').forEach(item => {
-    item.addEventListener('dragstart', (e) => {
-      dragItem = item;
-      item.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-    });
-
-    item.addEventListener('dragend', () => {
-      item.classList.remove('dragging');
-      list.querySelectorAll('.key-item').forEach(i => i.classList.remove('drag-over'));
-      dragItem = null;
-    });
-
-    item.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      if (item !== dragItem) {
-        item.classList.add('drag-over');
-      }
-    });
-
-    item.addEventListener('dragleave', () => {
-      item.classList.remove('drag-over');
-    });
-
-    item.addEventListener('drop', (e) => {
-      e.preventDefault();
-      item.classList.remove('drag-over');
-      if (dragItem && dragItem !== item) {
-        const items = [...list.querySelectorAll('.key-item')];
-        const fromIdx = items.indexOf(dragItem);
-        const toIdx = items.indexOf(item);
-        if (fromIdx < toIdx) {
-          item.after(dragItem);
-        } else {
-          item.before(dragItem);
-        }
-        saveKeyOrder();
-      }
-    });
-  });
-}
-
-async function saveKeyOrder() {
-  const list = document.getElementById('keyList');
-  if (!list) return;
-  const items = list.querySelectorAll('.key-item');
-  const keyOrder = [...items].map(i => i.dataset.keyId);
-  const profileEl = document.getElementById('keyProfileSelect');
-  const profile = profileEl ? profileEl.value : 'default';
-
-  await api('/api/keys/reorder', {
-    method: 'PUT',
-    body: { profile, keyOrder }
-  });
-  toast('Key order updated', 'success');
+  // No drag on Keys page — reorder via Profiles page
 }
 
 function showAddKeyModal() {
@@ -612,7 +552,9 @@ function renderFallback() {
     return;
   }
 
-  const fallbacks = Object.entries(cfg.modelFallback || {});
+  // Build ordered chain from modelFallback map: A→B, B→C becomes [A, B, C]
+  const fb = cfg.modelFallback || {};
+  const chain = buildFallbackChain(fb);
   const cooldownMin = Math.round((cfg.cooldownMs || 3600000) / 60000);
 
   content.innerHTML = `
@@ -621,18 +563,20 @@ function renderFallback() {
     <div class="card">
       <div class="flex-between mb-16">
         <div class="card-title">Model Fallback Chain</div>
-        <button class="btn btn-sm" onclick="showAddFallbackModal()">+ Add Rule</button>
+        <button class="btn btn-sm" onclick="showAddFallbackModel()">+ Add Model</button>
       </div>
-      ${fallbacks.length > 0 ? fallbacks.map(([from, to]) => `
-        <div class="fallback-row">
-          <span class="badge badge-blue">${escHtml(from)}</span>
-          <span class="fallback-arrow">→</span>
-          <span class="badge badge-green">${escHtml(to)}</span>
-          <button class="btn btn-sm btn-danger" onclick="removeFallback('${escAttr(from)}')" style="margin-left:auto">✕</button>
-        </div>
-      `).join('') : '<div class="text-muted text-sm">No fallback rules configured</div>'}
+      <div id="fallbackChain" class="fallback-chain">
+        ${chain.length > 0 ? chain.map((model, i) => `
+          <div class="fallback-chain-item" draggable="true" data-model="${escAttr(model)}" data-index="${i}">
+            <span class="drag-handle">⠿</span>
+            <span class="fallback-chain-label">${escHtml(model)}</span>
+            ${i < chain.length - 1 ? '<span class="fallback-chain-arrow">→</span>' : ''}
+            <button class="btn btn-sm btn-danger fallback-remove" onclick="removeFallbackModel('${escAttr(model)}')">✕</button>
+          </div>
+        `).join('') : '<div class="text-muted text-sm" style="padding:8px">No models configured. Add models to build a fallback chain.</div>'}
+      </div>
       <p class="text-muted text-sm mt-16">
-        When all keys are exhausted for a model, the proxy tries the fallback model with the same keys.
+        Drag to reorder. When all keys are rate-limited for the first model, the proxy tries the next model in the chain.
       </p>
     </div>
 
@@ -650,50 +594,108 @@ function renderFallback() {
       </p>
     </div>
   `;
+
+  setupFallbackDragDrop();
 }
 
-function showAddFallbackModal() {
+function buildFallbackChain(fb) {
+  // Convert {A:B, B:C} → [A, B, C]
+  const targets = new Set(Object.values(fb));
+  const starts = Object.keys(fb).filter(k => !targets.has(k) || !fb[Object.keys(fb).find(x => fb[x] === k)]);
+  if (starts.length === 0 && Object.keys(fb).length > 0) starts.push(Object.keys(fb)[0]);
+
+  const chain = [];
+  const visited = new Set();
+  for (const start of starts) {
+    let cur = start;
+    while (cur && !visited.has(cur)) {
+      visited.add(cur);
+      chain.push(cur);
+      cur = fb[cur];
+    }
+  }
+  // Add any orphan targets not in chain
+  for (const t of targets) { if (!visited.has(t)) chain.push(t); }
+  return chain;
+}
+
+function chainToFallbackMap(chain) {
+  const fb = {};
+  for (let i = 0; i < chain.length - 1; i++) {
+    fb[chain[i]] = chain[i + 1];
+  }
+  return fb;
+}
+
+function setupFallbackDragDrop() {
+  const list = document.getElementById('fallbackChain');
+  if (!list) return;
+  let dragItem = null;
+
+  list.querySelectorAll('.fallback-chain-item').forEach(item => {
+    item.addEventListener('dragstart', () => { dragItem = item; item.classList.add('dragging'); });
+    item.addEventListener('dragend', () => {
+      item.classList.remove('dragging');
+      list.querySelectorAll('.fallback-chain-item').forEach(i => i.classList.remove('drag-over'));
+      dragItem = null;
+    });
+    item.addEventListener('dragover', (e) => { e.preventDefault(); if (item !== dragItem) item.classList.add('drag-over'); });
+    item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
+    item.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      item.classList.remove('drag-over');
+      if (!dragItem || dragItem === item) return;
+      const items = [...list.querySelectorAll('.fallback-chain-item')];
+      const fromIdx = items.indexOf(dragItem);
+      const toIdx = items.indexOf(item);
+      if (fromIdx < toIdx) item.after(dragItem); else item.before(dragItem);
+      // Save
+      const newChain = [...list.querySelectorAll('.fallback-chain-item')].map(i => i.dataset.model);
+      await api('/api/config', { method: 'PUT', body: { modelFallback: chainToFallbackMap(newChain) } });
+      toast('Fallback order updated', 'success');
+      loadConfig();
+    });
+  });
+}
+
+function showAddFallbackModel() {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML = `
     <div class="modal">
-      <div class="modal-title">Add Fallback Rule</div>
+      <div class="modal-title">Add Model to Fallback Chain</div>
       <div class="form-group">
-        <label class="form-label">From Model</label>
-        <input class="form-input" id="fallbackFrom" placeholder="e.g., claude-opus-4-6">
-      </div>
-      <div class="form-group">
-        <label class="form-label">To Model (fallback)</label>
-        <input class="form-input" id="fallbackTo" placeholder="e.g., claude-sonnet-4-6">
+        <label class="form-label">Model Name</label>
+        <input class="form-input" id="fallbackModel" placeholder="e.g., claude-sonnet-4-20250514">
       </div>
       <div class="modal-actions">
         <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
-        <button class="btn btn-primary" onclick="addFallback()">Add</button>
+        <button class="btn btn-primary" onclick="addFallbackModel()">Add</button>
       </div>
     </div>
   `;
   document.body.appendChild(overlay);
-  overlay.querySelector('#fallbackFrom').focus();
+  overlay.querySelector('#fallbackModel').focus();
 }
 
-async function addFallback() {
-  const from = document.getElementById('fallbackFrom').value.trim();
-  const to = document.getElementById('fallbackTo').value.trim();
-  if (!from || !to) { toast('Both fields required', 'error'); return; }
+async function addFallbackModel() {
+  const model = document.getElementById('fallbackModel').value.trim();
+  if (!model) { toast('Model name required', 'error'); return; }
 
   const cfg = state.config;
-  cfg.modelFallback[from] = to;
-  await api('/api/config', { method: 'PUT', body: { modelFallback: cfg.modelFallback } });
+  const chain = buildFallbackChain(cfg.modelFallback || {});
+  chain.push(model);
+  await api('/api/config', { method: 'PUT', body: { modelFallback: chainToFallbackMap(chain) } });
   document.querySelector('.modal-overlay')?.remove();
-  toast('Fallback rule added', 'success');
+  toast('Model added to chain', 'success');
   loadConfig();
 }
 
-async function removeFallback(from) {
+async function removeFallbackModel(model) {
   const cfg = state.config;
-  delete cfg.modelFallback[from];
-  await api('/api/config', { method: 'PUT', body: { modelFallback: cfg.modelFallback } });
-  toast('Fallback rule removed', 'success');
+  const chain = buildFallbackChain(cfg.modelFallback || {}).filter(m => m !== model);
+  await api('/api/config', { method: 'PUT', body: { modelFallback: chainToFallbackMap(chain) } });
+  toast('Model removed', 'success');
   loadConfig();
 }
 
