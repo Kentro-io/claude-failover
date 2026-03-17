@@ -133,7 +133,10 @@ async function handleProxyRequest(req, res, profileName) {
 
         if (proxyRes.statusCode === 429) {
           const retryAfter = parseInt(proxyRes.headers['retry-after'], 10) || null;
+          // Set per-model cooldown
           const cd = cooldown.setCooldown(keyId, model, retryAfter, config.cooldownMs);
+          // Also set blanket key-level cooldown (rate limits are usually account-wide)
+          cooldown.setCooldown(keyId, null, retryAfter, config.cooldownMs);
           metrics.recordRetry();
           await consumeResponse(proxyRes);
           log('warn', '429 rate limited', {
@@ -148,6 +151,25 @@ async function handleProxyRequest(req, res, profileName) {
           metrics.recordRetry();
           await consumeResponse(proxyRes);
           log('warn', '529 overloaded', { key: keyId, model });
+          continue;
+        }
+
+        if (proxyRes.statusCode === 404) {
+          // 404 = key doesn't have access to this model/endpoint, try next key
+          await consumeResponse(proxyRes);
+          log('warn', '404 not found — key may lack model access', {
+            key: keyId, model, path: req.url
+          });
+          continue;
+        }
+
+        if (proxyRes.statusCode === 401 || proxyRes.statusCode === 403) {
+          // Auth failure — skip this key entirely (blanket cooldown)
+          cooldown.setCooldown(keyId, null, 300, config.cooldownMs);
+          await consumeResponse(proxyRes);
+          log('warn', `${proxyRes.statusCode} auth error — blanket cooldown`, {
+            key: keyId, model
+          });
           continue;
         }
 
