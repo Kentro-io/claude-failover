@@ -544,16 +544,6 @@ function renderProfiles() {
       });
     });
   });
-
-    <div class="card mt-16">
-      <div class="card-title">How Profiles Work</div>
-      <p class="text-muted text-sm" style="line-height:1.8">
-        Each profile runs on its own port with its own key priority order.
-        Point different tools to different ports to use different key strategies.<br>
-        Example: Claude Code on :4080 (key1 first), Cursor on :4081 (key2 first).
-      </p>
-    </div>
-  `;
 }
 
 function showAddProfileModal() {
