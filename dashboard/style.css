@@ -606,3 +606,16 @@ tr:hover td {
     grid-template-columns: repeat(2, 1fr);
   }
 }
+
+/* Profile key reorder */
+.profile-key-list { display:flex; flex-direction:column; gap:4px; }
+.profile-key-item {
+  display:flex; align-items:center; gap:10px;
+  padding:8px 12px; background:#1a1a2e; border:1px solid #2a2a3e;
+  border-radius:6px; cursor:grab; transition:all 0.15s;
+}
+.profile-key-item:hover { border-color:#4a4a6e; background:#1e1e34; }
+.profile-key-item.dragging { opacity:0.4; }
+.profile-key-item.drag-over { border-color:#6366f1; background:#1e1e3e; }
+.profile-key-item .drag-handle { color:#666; user-select:none; font-size:14px; }
+.profile-key-item .key-label { font-weight:500; font-size:13px; }

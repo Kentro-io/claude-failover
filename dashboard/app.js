@@ -482,7 +482,7 @@ function renderProfiles() {
     </div>
 
     ${profiles.map(p => `
-      <div class="card">
+      <div class="card" data-profile="${escAttr(p.name)}">
         <div class="flex-between">
           <div>
             <div style="font-size:15px;font-weight:600;margin-bottom:4px">${escHtml(p.name)}</div>
@@ -492,11 +492,58 @@ function renderProfiles() {
             ${p.name !== 'default' ? `<button class="btn btn-sm btn-danger" onclick="deleteProfile('${escAttr(p.name)}')">Delete</button>` : ''}
           </div>
         </div>
-        <div class="mt-8 text-sm text-muted">
-          Key order: ${p.keyOrder.length > 0 ? p.keyOrder.map(k => escHtml(k)).join(' → ') : '(empty)'}
+        <div class="profile-key-list mt-8" data-profile-name="${escAttr(p.name)}">
+          ${p.keyOrder.map((k, i) => `
+            <div class="profile-key-item" draggable="true" data-key-id="${escAttr(k)}" data-index="${i}">
+              <span class="drag-handle">⠿</span>
+              <span class="key-label">${escHtml(state.keys.find(x => x.id === k)?.label || k)}</span>
+              <span class="text-muted text-sm">${escHtml(k)}</span>
+            </div>
+          `).join('')}
+          ${p.keyOrder.length === 0 ? '<div class="text-muted text-sm" style="padding:8px">(no keys)</div>' : ''}
         </div>
       </div>
     `).join('')}
+  `;
+
+  // Setup drag-and-drop for each profile's key list
+  document.querySelectorAll('.profile-key-list').forEach(list => {
+    const profileName = list.dataset.profileName;
+    let dragItem = null;
+
+    list.querySelectorAll('.profile-key-item').forEach(item => {
+      item.addEventListener('dragstart', () => {
+        dragItem = item;
+        item.classList.add('dragging');
+      });
+      item.addEventListener('dragend', () => {
+        item.classList.remove('dragging');
+        list.querySelectorAll('.profile-key-item').forEach(i => i.classList.remove('drag-over'));
+        dragItem = null;
+      });
+      item.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (item !== dragItem) item.classList.add('drag-over');
+      });
+      item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
+      item.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        item.classList.remove('drag-over');
+        if (!dragItem || dragItem === item) return;
+        // Reorder DOM
+        const items = [...list.querySelectorAll('.profile-key-item')];
+        const fromIdx = items.indexOf(dragItem);
+        const toIdx = items.indexOf(item);
+        if (fromIdx < toIdx) item.after(dragItem);
+        else item.before(dragItem);
+        // Save new order
+        const newOrder = [...list.querySelectorAll('.profile-key-item')].map(i => i.dataset.keyId);
+        await api('/api/keys/reorder', { method: 'PUT', body: { profile: profileName, keyOrder: newOrder } });
+        toast('Key order updated', 'success');
+        loadProfiles();
+      });
+    });
+  });
 
     <div class="card mt-16">
       <div class="card-title">How Profiles Work</div>
