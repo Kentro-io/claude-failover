@@ -188,15 +188,26 @@ async function handleAPI(req, res, profileName) {
 
   // Keys
   if (apiPath === '/api/keys' && method === 'GET') {
-    const keys = Object.entries(config.keys).map(([id, k]) => ({
-      id,
-      label: k.label,
-      type: k.type,
-      masked: maskToken(k.token),
-      addedAt: k.addedAt,
-      requests: metrics.getMetrics().byKey[id] || 0,
-      inCooldown: cooldown.isInCooldown(id)
-    }));
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const profileName = url.searchParams.get('profile') || 'default';
+    const profile = config.profiles[profileName] || config.profiles.default;
+    const keyOrder = profile?.keyOrder || Object.keys(config.keys);
+
+    // Return keys sorted by the profile's keyOrder
+    const keys = keyOrder
+      .filter(id => config.keys[id])
+      .map(id => {
+        const k = config.keys[id];
+        return {
+          id,
+          label: k.label,
+          type: k.type,
+          masked: maskToken(k.token),
+          addedAt: k.addedAt,
+          requests: metrics.getMetrics().byKey[id] || 0,
+          inCooldown: cooldown.isInCooldown(id)
+        };
+      });
     sendJSON(res, 200, { keys });
     return;
   }

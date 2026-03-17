@@ -93,7 +93,9 @@ async function loadStatus() {
 }
 
 async function loadKeys() {
-  const data = await api('/api/keys');
+  const profileEl = document.getElementById('keyProfileSelect');
+  const profile = profileEl ? profileEl.value : 'default';
+  const data = await api(`/api/keys?profile=${encodeURIComponent(profile)}`);
   state.keys = data.keys || [];
   if (state.currentPage === 'keys') renderKeys();
 }
