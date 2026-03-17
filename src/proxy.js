@@ -98,7 +98,7 @@ async function handleProxyRequest(req, res, profileName) {
   const originalModel = parsedBody?.model;
   const startTime = Date.now();
 
-  // Build model chain: requested → fallback
+  // Build model chain: requested -> fallback
   const modelChain = [originalModel];
   if (originalModel && config.modelFallback && config.modelFallback[originalModel]) {
     modelChain.push(config.modelFallback[originalModel]);
@@ -179,7 +179,7 @@ async function handleProxyRequest(req, res, profileName) {
 
         if (isModelFallback) {
           metrics.recordModelFallback();
-          log('info', `Model fallback: ${originalModel} → ${model}`, {
+          log('info', `Model fallback: ${originalModel} -> ${model}`, {
             key: keyId, profile: profileName
           });
         }
@@ -191,7 +191,7 @@ async function handleProxyRequest(req, res, profileName) {
           key: keyId,
           status: proxyRes.statusCode,
           latency,
-          fallback: isModelFallback ? `${originalModel} → ${model}` : null
+          fallback: isModelFallback ? `${originalModel} -> ${model}` : null
         });
 
         // Build response headers
@@ -202,7 +202,7 @@ async function handleProxyRequest(req, res, profileName) {
         responseHeaders['x-proxy-key'] = keyId;
         responseHeaders['x-proxy-model'] = model || 'unknown';
         if (isModelFallback) {
-          responseHeaders['x-proxy-fallback'] = `${originalModel} → ${model}`;
+          responseHeaders['x-proxy-fallback'] = `${originalModel} -> ${model}`;
         }
 
         res.writeHead(proxyRes.statusCode, responseHeaders);

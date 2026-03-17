@@ -532,7 +532,14 @@ function createRequestHandler(profileName) {
         return;
       }
 
-      // Everything else → proxy to Anthropic
+      // Block non-API paths (favicon, robots.txt, etc.) from reaching the proxy
+      if (!req.url.startsWith('/v1/')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Not an API path' }));
+        return;
+      }
+
+      // Everything else -> proxy to Anthropic
       await handleProxyRequest(req, res, profileName);
     } catch (err) {
       log('error', 'Unhandled request error', {
@@ -560,7 +567,7 @@ function startServers() {
       log('info', `Proxy [${name}] listening on 127.0.0.1:${profile.port}`);
       const keyOrder = profile.keyOrder || [];
       if (keyOrder.length > 0) {
-        log('info', `Key order [${name}]: ${keyOrder.join(' → ')}`);
+        log('info', `Key order [${name}]: ${keyOrder.join(' -> ')}`);
       }
     });
 
