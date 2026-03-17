@@ -133,21 +133,21 @@ async function handleProxyRequest(req, res, profileName) {
 
         if (proxyRes.statusCode === 429) {
           const retryAfter = parseInt(proxyRes.headers['retry-after'], 10) || null;
-          // Set per-model cooldown
-          const cd = cooldown.setCooldown(keyId, model, retryAfter, config.cooldownMs);
-          // Also set blanket key-level cooldown (rate limits are usually account-wide)
-          cooldown.setCooldown(keyId, null, retryAfter, config.cooldownMs);
+          // Set per-model cooldown only (not blanket key — rate limits are per-model)
+          const cooldownSec = retryAfter || 30; // 30s default, not 1 hour
+          const cd = cooldown.setCooldown(keyId, model, cooldownSec, config.cooldownMs);
           metrics.recordRetry();
           await consumeResponse(proxyRes);
           log('warn', '429 rate limited', {
-            key: keyId, model, retryAfter, profile: profileName,
+            key: keyId, model, retryAfter, cooldownSec, profile: profileName,
             cooldownUntil: cd.until
           });
           continue;
         }
 
         if (proxyRes.statusCode === 529) {
-          cooldown.setCooldown(keyId, model, 60, config.cooldownMs);
+          // 529 = server overload, not account-specific. Short cooldown, try next key.
+          cooldown.setCooldown(keyId, model, 10, 30000);
           metrics.recordRetry();
           await consumeResponse(proxyRes);
           log('warn', '529 overloaded', { key: keyId, model });

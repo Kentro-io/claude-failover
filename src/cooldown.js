@@ -28,9 +28,10 @@ function isInCooldown(keyId, model) {
 }
 
 function setCooldown(keyId, model, retryAfterSec, defaultCooldownMs) {
+  const maxCooldownMs = defaultCooldownMs || 300000; // 5 min max, not 1 hour
   const durationMs = retryAfterSec
-    ? Math.min(retryAfterSec * 1000, defaultCooldownMs || 3600000)
-    : (defaultCooldownMs || 3600000);
+    ? Math.min(retryAfterSec * 1000, maxCooldownMs)
+    : Math.min(30000, maxCooldownMs); // 30s default if no retry-after
   const until = Date.now() + durationMs;
   const ck = cooldownKey(keyId, model);
   cooldowns.set(ck, until);
