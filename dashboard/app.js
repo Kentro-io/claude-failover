@@ -569,7 +569,8 @@ function renderFallback() {
         ${chain.length > 0 ? chain.map((model, i) => `
           <div class="fallback-chain-item" draggable="true" data-model="${escAttr(model)}" data-index="${i}">
             <span class="drag-handle">⠿</span>
-            <span class="fallback-chain-label">${escHtml(model)}</span>
+            <span class="fallback-chain-label" ondblclick="editFallbackModel(this, '${escAttr(model)}')">${escHtml(model)}</span>
+            <button class="btn btn-sm fallback-edit" onclick="editFallbackModel(this.previousElementSibling, '${escAttr(model)}')" title="Edit">✎</button>
             ${i < chain.length - 1 ? '<span class="fallback-chain-arrow">→</span>' : ''}
             <button class="btn btn-sm btn-danger fallback-remove" onclick="removeFallbackModel('${escAttr(model)}')">✕</button>
           </div>
@@ -697,6 +698,31 @@ async function removeFallbackModel(model) {
   await api('/api/config', { method: 'PUT', body: { modelFallback: chainToFallbackMap(chain) } });
   toast('Model removed', 'success');
   loadConfig();
+}
+
+function editFallbackModel(labelEl, oldModel) {
+  if (labelEl.querySelector('input')) return; // already editing
+  const input = document.createElement('input');
+  input.className = 'form-input';
+  input.value = oldModel;
+  input.style.cssText = 'font-size:13px;padding:2px 6px;margin:-2px 0;width:100%';
+  labelEl.textContent = '';
+  labelEl.appendChild(input);
+  input.focus();
+  input.select();
+
+  const save = async () => {
+    const newModel = input.value.trim();
+    if (!newModel || newModel === oldModel) { loadConfig(); return; }
+    const cfg = state.config;
+    const chain = buildFallbackChain(cfg.modelFallback || {}).map(m => m === oldModel ? newModel : m);
+    await api('/api/config', { method: 'PUT', body: { modelFallback: chainToFallbackMap(chain) } });
+    toast('Model updated', 'success');
+    loadConfig();
+  };
+
+  input.addEventListener('keydown', (e) => { if (e.key === 'Enter') save(); if (e.key === 'Escape') loadConfig(); });
+  input.addEventListener('blur', save);
 }
 
 async function saveCooldownSettings() {

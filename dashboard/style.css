@@ -641,3 +641,8 @@ tr:hover td {
   width:24px; height:24px; border-radius:50%; background:#2a2a3e;
   color:#888; font-size:11px; font-weight:600; flex-shrink:0;
 }
+
+/* Fallback edit button */
+.fallback-edit { opacity:0; transition:opacity 0.15s; font-size:14px; padding:2px 6px; }
+.fallback-chain-item:hover .fallback-edit { opacity:0.6; }
+.fallback-chain-item:hover .fallback-edit:hover { opacity:1; }
