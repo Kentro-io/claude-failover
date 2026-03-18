@@ -8,6 +8,7 @@ const state = {
   totalFailures: 0,
   totalSuccess: 0,
   modelFallbacks: 0,
+  totalQueued: 0,
   byKey: {},
   byModel: {},
   startedAt: Date.now()
@@ -39,6 +40,10 @@ function recordModelFallback() {
   state.modelFallbacks++;
 }
 
+function recordQueuedRetry() {
+  state.totalQueued++;
+}
+
 function addRecentRequest(entry) {
   recentRequests.push({
     ...entry,
@@ -66,6 +71,7 @@ module.exports = {
   recordRetry,
   recordFailure,
   recordModelFallback,
+  recordQueuedRetry,
   addRecentRequest,
   getMetrics,
   getRecentRequests

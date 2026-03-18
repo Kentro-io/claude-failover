@@ -64,10 +64,34 @@ function getActiveCooldowns() {
   return active;
 }
 
+function getShortestWait(keyIds, models) {
+  const now = Date.now();
+  let shortest = Infinity;
+
+  for (const keyId of keyIds) {
+    for (const model of models) {
+      // Check blanket key cooldown
+      const keyCD = cooldowns.get(keyId);
+      if (keyCD && now < keyCD) {
+        shortest = Math.min(shortest, keyCD - now);
+      }
+      // Check key+model cooldown
+      const ck = cooldownKey(keyId, model);
+      const modelCD = cooldowns.get(ck);
+      if (modelCD && now < modelCD) {
+        shortest = Math.min(shortest, modelCD - now);
+      }
+    }
+  }
+
+  return shortest === Infinity ? 0 : shortest;
+}
+
 module.exports = {
   isInCooldown,
   setCooldown,
   clearAllCooldowns,
   clearCooldown,
-  getActiveCooldowns
+  getActiveCooldowns,
+  getShortestWait
 };

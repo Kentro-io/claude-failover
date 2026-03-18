@@ -18,6 +18,8 @@
   --amber-dim: #78350f;
   --red: #ef4444;
   --red-dim: #7f1d1d;
+  --cyan: #06b6d4;
+  --cyan-dim: #164e63;
   --sidebar-width: 220px;
   --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
 }
@@ -201,6 +203,7 @@ body {
 .metric-value.amber { color: var(--amber); }
 .metric-value.red { color: var(--red); }
 .metric-value.blue { color: var(--blue); }
+.metric-value.cyan { color: var(--cyan); }
 
 /* Tables */
 .table-wrap {
@@ -244,6 +247,7 @@ tr:hover td {
 .badge-amber { background: var(--amber-dim); color: var(--amber); }
 .badge-red { background: var(--red-dim); color: var(--red); }
 .badge-blue { background: var(--blue-dim); color: var(--blue); }
+.badge-cyan { background: var(--cyan-dim); color: var(--cyan); }
 
 /* Buttons */
 .btn {
@@ -444,6 +448,40 @@ tr:hover td {
 .log-msg {
   color: var(--text-primary);
   word-break: break-all;
+}
+
+/* Log entry highlights for rate limit / queued */
+.log-entry.log-ratelimit {
+  border-left: 2px solid var(--amber);
+  padding-left: 6px;
+}
+
+.log-entry.log-queued {
+  border-left: 2px solid var(--cyan);
+  padding-left: 6px;
+  background: rgba(6, 182, 212, 0.04);
+}
+
+/* Log tags */
+.log-tag {
+  display: inline-block;
+  padding: 0 5px;
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+
+.tag-ratelimit {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+
+.tag-queued {
+  background: var(--cyan-dim);
+  color: var(--cyan);
 }
 
 /* Setup Cards */

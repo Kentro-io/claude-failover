@@ -22,6 +22,7 @@ const DEFAULT_CONFIG = {
     'claude-opus-4-5-20250414': 'claude-sonnet-4-5-20250414'
   },
   cooldownMs: 60000,
+  queueWaitMs: 90000,
   logLevel: 'info',
   maxLogSize: 5242880
 };

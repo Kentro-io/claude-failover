@@ -383,6 +383,7 @@ async function handleAPI(req, res, profileName) {
       profiles: config.profiles,
       modelFallback: config.modelFallback,
       cooldownMs: config.cooldownMs,
+      queueWaitMs: config.queueWaitMs ?? 90000,
       logLevel: config.logLevel,
       maxLogSize: config.maxLogSize
     };
@@ -394,6 +395,7 @@ async function handleAPI(req, res, profileName) {
     const body = await parseBody(req);
     if (body.modelFallback) config.modelFallback = body.modelFallback;
     if (body.cooldownMs !== undefined) config.cooldownMs = parseInt(body.cooldownMs, 10);
+    if (body.queueWaitMs !== undefined) config.queueWaitMs = parseInt(body.queueWaitMs, 10);
     if (body.logLevel) config.logLevel = body.logLevel;
 
     saveConfig(config);
@@ -476,6 +478,7 @@ function buildStatus(config, profileName) {
       retries: m.totalRetries,
       failures: m.totalFailures,
       modelFallbacks: m.modelFallbacks,
+      queued: m.totalQueued,
       byKey: m.byKey,
       byModel: m.byModel,
       successRate: m.totalRequests > 0

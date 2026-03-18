@@ -191,6 +191,10 @@ function renderStatus() {
         <div class="metric-label">Failures</div>
       </div>
       <div class="metric-card">
+        <div class="metric-value cyan">${m.queued || 0}</div>
+        <div class="metric-label">Queued Retries</div>
+      </div>
+      <div class="metric-card">
         <div class="metric-value">${m.modelFallbacks}</div>
         <div class="metric-label">Model Fallbacks</div>
       </div>
@@ -229,7 +233,7 @@ function renderStatus() {
                 <th>Key</th>
                 <th>Status</th>
                 <th>Latency</th>
-                <th>Fallback</th>
+                <th>Info</th>
               </tr>
             </thead>
             <tbody>
@@ -238,9 +242,9 @@ function renderStatus() {
                   <td class="text-muted">${formatTime(r.timestamp)}</td>
                   <td>${escHtml(r.model)}</td>
                   <td>${escHtml(r.key)}</td>
-                  <td>${statusBadge(r.status)}</td>
+                  <td>${statusBadge(r.status, r)}</td>
                   <td>${r.latency}ms</td>
-                  <td>${r.fallback ? `<span class="badge badge-amber">${escHtml(r.fallback)}</span>` : '—'}</td>
+                  <td>${requestInfoBadges(r)}</td>
                 </tr>
               `).join('')}
             </tbody>
@@ -556,6 +560,7 @@ function renderFallback() {
   const fb = cfg.modelFallback || {};
   const chain = buildFallbackChain(fb);
   const cooldownMin = Math.round((cfg.cooldownMs || 3600000) / 60000);
+  const queueWaitSec = Math.round((cfg.queueWaitMs ?? 90000) / 1000);
 
   content.innerHTML = `
     <h1 class="page-title">Fallback & Cooldown</h1>
@@ -582,8 +587,18 @@ function renderFallback() {
     </div>
 
     <div class="card">
-      <div class="card-title">Cooldown Settings</div>
+      <div class="card-title">Queue & Cooldown Settings</div>
       <div class="form-group mt-8">
+        <label class="form-label">Queue Wait (seconds) — hold requests when all keys are rate-limited</label>
+        <div class="flex gap-8">
+          <input class="form-input" id="queueWaitSec" type="number" value="${queueWaitSec}" style="width:120px" min="0" max="300">
+          <button class="btn" onclick="saveQueueSettings()">Save</button>
+        </div>
+      </div>
+      <p class="text-muted text-sm mt-8">
+        When all keys hit API rate limits, hold the request and retry when a cooldown expires. Set to 0 to disable (fail immediately). Default: 90s.
+      </p>
+      <div class="form-group mt-16">
         <label class="form-label">Cooldown Duration (minutes)</label>
         <div class="flex gap-8">
           <input class="form-input" id="cooldownMin" type="number" value="${cooldownMin}" style="width:120px">
@@ -725,6 +740,13 @@ function editFallbackModel(labelEl, oldModel) {
   input.addEventListener('blur', save);
 }
 
+async function saveQueueSettings() {
+  const sec = parseInt(document.getElementById('queueWaitSec').value, 10);
+  if (isNaN(sec) || sec < 0) { toast('Invalid duration', 'error'); return; }
+  await api('/api/config', { method: 'PUT', body: { queueWaitMs: sec * 1000 } });
+  toast(sec > 0 ? `Queue wait set to ${sec}s` : 'Request queuing disabled', 'success');
+}
+
 async function saveCooldownSettings() {
   const min = parseInt(document.getElementById('cooldownMin').value, 10);
   if (isNaN(min) || min < 1) { toast('Invalid duration', 'error'); return; }
@@ -824,6 +846,8 @@ function renderLogs() {
           <option value="error">Errors</option>
           <option value="warn">Warnings</option>
           <option value="info">Info</option>
+          <option value="ratelimit">Rate Limits</option>
+          <option value="queued">Queued</option>
         </select>
       </div>
     </div>
@@ -837,10 +861,15 @@ function renderLogs() {
 }
 
 function renderLogEntry(entry) {
-  return `<div class="log-entry" data-level="${entry.l}">
+  const tags = [];
+  if (entry.rateLimit) tags.push('<span class="log-tag tag-ratelimit">RATE LIMIT</span>');
+  if (entry.queued) tags.push('<span class="log-tag tag-queued">QUEUED</span>');
+  const tagHtml = tags.length > 0 ? ' ' + tags.join(' ') : '';
+
+  return `<div class="log-entry${entry.queued ? ' log-queued' : ''}${entry.rateLimit && !entry.queued ? ' log-ratelimit' : ''}" data-level="${entry.l}">
     <span class="log-time">${formatTime(entry.t)}</span>
     <span class="log-level ${entry.l}">${entry.l}</span>
-    <span class="log-msg">${escHtml(entry.m)}${entry.key ? ` [${escHtml(entry.key)}]` : ''}${entry.model ? ` ${escHtml(entry.model)}` : ''}</span>
+    <span class="log-msg">${escHtml(entry.m)}${entry.key ? ` [${escHtml(entry.key)}]` : ''}${entry.model ? ` ${escHtml(entry.model)}` : ''}${tagHtml}</span>
   </div>`;
 }
 
@@ -849,7 +878,11 @@ function appendLogEntry(entry) {
   if (!viewer) return;
 
   const filter = document.getElementById('logFilter')?.value;
-  if (filter && filter !== 'all' && entry.l !== filter) return;
+  if (filter && filter !== 'all') {
+    if (filter === 'ratelimit' && !entry.rateLimit && !entry.queued) return;
+    if (filter === 'queued' && !entry.queued) return;
+    if (filter !== 'ratelimit' && filter !== 'queued' && entry.l !== filter) return;
+  }
 
   viewer.insertAdjacentHTML('beforeend', renderLogEntry(entry));
 
@@ -863,10 +896,14 @@ function filterLogs() {
   const filter = document.getElementById('logFilter')?.value;
   const entries = document.querySelectorAll('.log-entry');
   entries.forEach(el => {
-    if (filter === 'all' || el.dataset.level === filter) {
+    if (filter === 'all') {
       el.style.display = '';
+    } else if (filter === 'ratelimit') {
+      el.style.display = el.classList.contains('log-ratelimit') || el.classList.contains('log-queued') ? '' : 'none';
+    } else if (filter === 'queued') {
+      el.style.display = el.classList.contains('log-queued') ? '' : 'none';
     } else {
-      el.style.display = 'none';
+      el.style.display = el.dataset.level === filter ? '' : 'none';
     }
   });
 }
@@ -906,11 +943,26 @@ function formatTime(iso) {
   return d.toLocaleTimeString('en-US', { hour12: false });
 }
 
-function statusBadge(code) {
-  if (code >= 200 && code < 300) return `<span class="badge badge-green">${code}</span>`;
-  if (code === 429) return '<span class="badge badge-amber">429</span>';
+function statusBadge(code, req) {
+  if (code >= 200 && code < 300) {
+    if (req && req.queued) return `<span class="badge badge-green">${code}</span><span class="badge badge-cyan" title="Held ${req.queued} attempt(s)">QUEUED</span>`;
+    return `<span class="badge badge-green">${code}</span>`;
+  }
+  if (code === 429) {
+    if (req && req.queued) return `<span class="badge badge-red">429</span><span class="badge badge-amber" title="Queued ${req.queued}x but exhausted">QUEUE TIMEOUT</span>`;
+    return '<span class="badge badge-red">429 RATE LIMIT</span>';
+  }
   if (code >= 400) return `<span class="badge badge-red">${code}</span>`;
   return `<span class="badge">${code}</span>`;
+}
+
+function requestInfoBadges(r) {
+  const parts = [];
+  if (r.fallback) parts.push(`<span class="badge badge-amber">${escHtml(r.fallback)}</span>`);
+  if (r.queued) parts.push(`<span class="badge badge-cyan" title="Request was held and retried">queued ${r.queued}x</span>`);
+  if (r.error === 'all_keys_exhausted') parts.push('<span class="badge badge-red">rate limit</span>');
+  if (r.error === 'server_error_retries_exhausted') parts.push('<span class="badge badge-red">server error</span>');
+  return parts.length > 0 ? parts.join(' ') : '—';
 }
 
 // ─── Init ────────────────────────────────────────────────────────────────────
