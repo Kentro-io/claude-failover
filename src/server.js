@@ -310,6 +310,26 @@ async function handleAPI(req, res, profileName) {
     return;
   }
 
+  // OpenAI key reorder
+  if (apiPath === '/api/openai-keys/reorder' && method === 'PUT') {
+    const body = await parseBody(req);
+    if (!body?.profile || !Array.isArray(body?.openaiKeyOrder)) {
+      sendJSON(res, 400, { error: 'Missing profile or openaiKeyOrder' });
+      return;
+    }
+    const prof = config.profiles[body.profile];
+    if (!prof) {
+      sendJSON(res, 404, { error: 'Profile not found' });
+      return;
+    }
+    prof.openaiKeyOrder = body.openaiKeyOrder;
+    saveConfig(config);
+    log('info', `OpenAI key order updated for profile ${body.profile}`);
+    sendJSON(res, 200, { success: true });
+    broadcast('config', { action: 'openai-keys-reordered', profile: body.profile });
+    return;
+  }
+
   // OpenAI Keys
   if (apiPath === '/api/openai-keys' && method === 'GET') {
     const openaiKeys = config.openaiKeys || {};

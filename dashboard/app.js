@@ -596,7 +596,7 @@ function renderProfiles() {
         <div class="flex-between">
           <div>
             <div style="font-size:15px;font-weight:600;margin-bottom:4px">${escHtml(p.name)}</div>
-            <div class="text-muted text-sm">Port ${p.port} · ${p.keyOrder.length} key(s)</div>
+            <div class="text-muted text-sm">Port ${p.port} · ${p.keyOrder.length} <span class="provider-badge anthropic" style="font-size:9px;padding:1px 5px">Anthropic</span> + ${(p.openaiKeyOrder || []).length} <span class="provider-badge openai" style="font-size:9px;padding:1px 5px">OpenAI</span></div>
           </div>
           <div class="flex gap-8">
             ${p.name !== 'default' ? `<button class="btn btn-sm btn-danger" onclick="deleteProfile('${escAttr(p.name)}')">Delete</button>` : ''}
