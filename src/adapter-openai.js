@@ -104,7 +104,7 @@ function translateRequest(anthropicBody, targetModel) {
   const openaiPayload = {
     model: targetModel,
     messages,
-    max_tokens: anthropicBody.max_tokens,
+    max_completion_tokens: anthropicBody.max_tokens,
     stream: anthropicBody.stream === true
   };
 
