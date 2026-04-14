@@ -220,6 +220,13 @@ async function handleAPI(req, res, profileName) {
     }
 
     const token = body.token.trim();
+
+    // Guard: reject OpenAI keys on the Anthropic endpoint
+    if (!token.startsWith('sk-ant-')) {
+      sendJSON(res, 400, { error: 'This token does not look like an Anthropic key (expected sk-ant-...). Use the OpenAI keys endpoint for OpenAI tokens.' });
+      return;
+    }
+
     const label = body.label || 'Unnamed Key';
     const type = detectKeyType(token);
     const id = generateKeyId(label);
@@ -338,6 +345,13 @@ async function handleAPI(req, res, profileName) {
     }
 
     const token = body.token.trim();
+
+    // Guard: reject Anthropic keys on the OpenAI endpoint
+    if (token.startsWith('sk-ant-')) {
+      sendJSON(res, 400, { error: 'This token looks like an Anthropic key (sk-ant-...). Use the Anthropic keys endpoint instead.' });
+      return;
+    }
+
     const label = body.label || 'Unnamed OpenAI Key';
     const type = detectOpenAIKeyType(token);
     const id = generateOpenAIKeyId(label);
@@ -393,12 +407,35 @@ async function handleAPI(req, res, profileName) {
     return;
   }
 
+  // Reorder OpenAI keys
+  if (apiPath === '/api/openai-keys/reorder' && method === 'PUT') {
+    const body = await parseBody(req);
+    if (!body?.profile || !Array.isArray(body?.openaiKeyOrder)) {
+      sendJSON(res, 400, { error: 'Missing profile or openaiKeyOrder' });
+      return;
+    }
+
+    const prof = config.profiles[body.profile];
+    if (!prof) {
+      sendJSON(res, 404, { error: 'Profile not found' });
+      return;
+    }
+
+    prof.openaiKeyOrder = body.openaiKeyOrder;
+    saveConfig(config);
+    log('info', `OpenAI key order updated for profile ${body.profile}`);
+    sendJSON(res, 200, { success: true });
+    broadcast('config', { action: 'openai-keys-reordered', profile: body.profile });
+    return;
+  }
+
   // Profiles
   if (apiPath === '/api/profiles' && method === 'GET') {
     const profiles = Object.entries(config.profiles).map(([name, p]) => ({
       name,
       port: p.port,
-      keyOrder: p.keyOrder
+      keyOrder: p.keyOrder,
+      openaiKeyOrder: p.openaiKeyOrder || []
     }));
     sendJSON(res, 200, { profiles });
     return;
@@ -564,6 +601,9 @@ async function handleAPI(req, res, profileName) {
 
 function buildStatus(config, profileName) {
   const m = metrics.getMetrics();
+  const recent = metrics.getRecentRequests(100);
+  const anthropicCount = recent.filter(r => r.provider !== 'openai').length;
+  const openaiCount = recent.filter(r => r.provider === 'openai').length;
   return {
     status: 'ok',
     uptime: m.uptime,
@@ -579,7 +619,9 @@ function buildStatus(config, profileName) {
       byModel: m.byModel,
       successRate: m.totalRequests > 0
         ? Math.round((m.totalSuccess / m.totalRequests) * 100)
-        : 100
+        : 100,
+      anthropicRequests: anthropicCount,
+      openaiRequests: openaiCount
     },
     cooldowns: cooldown.getActiveCooldowns(),
     recentRequests: metrics.getRecentRequests(10),

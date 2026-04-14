@@ -684,3 +684,40 @@ tr:hover td {
 .fallback-edit { opacity:0; transition:opacity 0.15s; font-size:14px; padding:2px 6px; }
 .fallback-chain-item:hover .fallback-edit { opacity:0.6; }
 .fallback-chain-item:hover .fallback-edit:hover { opacity:1; }
+
+/* Provider badges */
+.provider-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.provider-badge.anthropic { background: #92400e; color: #fbbf24; }
+.provider-badge.openai { background: #065f46; color: #34d399; }
+
+/* Model mapping table */
+.mapping-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.mapping-row .form-input { flex: 1; }
+.mapping-arrow { color: var(--text-muted); font-size: 16px; flex-shrink: 0; padding: 0 4px; }
+
+/* Provider section header */
+.provider-section {
+  margin-bottom: 8px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}

@@ -178,6 +178,10 @@ function renderStatus() {
   const m = s.metrics;
   const cooldowns = Object.entries(s.cooldowns || {});
 
+  // Provider breakdown from server metrics
+  const anthropicReqs = m.anthropicRequests || 0;
+  const openaiReqs = m.openaiRequests || 0;
+
   content.innerHTML = `
     <h1 class="page-title">Status Overview</h1>
     <div class="metrics-grid">
@@ -188,6 +192,14 @@ function renderStatus() {
       <div class="metric-card">
         <div class="metric-value green">${m.successRate}%</div>
         <div class="metric-label">Success Rate</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" style="color:#fbbf24">${anthropicReqs}</div>
+        <div class="metric-label">Claude (Recent)</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-value" style="color:#34d399">${openaiReqs}</div>
+        <div class="metric-label">OpenAI (Recent)</div>
       </div>
       <div class="metric-card">
         <div class="metric-value amber">${m.retries}</div>
@@ -236,6 +248,7 @@ function renderStatus() {
             <thead>
               <tr>
                 <th>Time</th>
+                <th>Provider</th>
                 <th>Model</th>
                 <th>Key</th>
                 <th>Status</th>
@@ -247,6 +260,7 @@ function renderStatus() {
               ${s.recentRequests.slice().reverse().map(r => `
                 <tr>
                   <td class="text-muted">${formatTime(r.timestamp)}</td>
+                  <td>${r.provider === 'openai' ? '<span class="provider-badge openai">OpenAI</span>' : '<span class="provider-badge anthropic">Anthropic</span>'}</td>
                   <td>${escHtml(r.model)}</td>
                   <td>${escHtml(r.key)}</td>
                   <td>${statusBadge(r.status, r)}</td>
@@ -340,6 +354,7 @@ function renderKeyItem(k, index) {
   return `
     <div class="key-item" data-key-id="${escAttr(k.id)}" data-index="${index}">
       <span class="key-priority">${index + 1}</span>
+      <span class="provider-badge anthropic">Anthropic</span>
       <div class="key-info">
         <div class="key-id">${escHtml(k.label)} <span class="text-muted text-sm">(${escHtml(k.id)})</span></div>
         <div class="key-meta">
@@ -359,6 +374,13 @@ function setupDragDrop() {
   // No drag on Keys page — reorder via Profiles page
 }
 
+function detectKeyProvider(token) {
+  if (token.startsWith('sk-ant-')) return 'anthropic';
+  if (token.startsWith('sk-proj-') || token.startsWith('sk-')) return 'openai';
+  if (token.startsWith('eyJ')) return 'openai';
+  return null;
+}
+
 function showAddKeyModal() {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -366,8 +388,17 @@ function showAddKeyModal() {
     <div class="modal">
       <div class="modal-title">Add API Key</div>
       <div class="form-group">
+        <label class="form-label">Provider</label>
+        <select class="form-select" id="newKeyProvider">
+          <option value="">Auto-detect from key</option>
+          <option value="anthropic">Anthropic</option>
+          <option value="openai">OpenAI</option>
+        </select>
+        <div id="providerDetected" class="text-sm mt-8" style="display:none"></div>
+      </div>
+      <div class="form-group">
         <label class="form-label">API Key or OAuth Token</label>
-        <input class="form-input" id="newKeyToken" placeholder="sk-ant-api03-... or sk-ant-oat01-..." autocomplete="off">
+        <input class="form-input" id="newKeyToken" placeholder="sk-ant-..., sk-proj-..., or eyJ..." autocomplete="off">
       </div>
       <div class="form-group">
         <label class="form-label">Label</label>
@@ -375,7 +406,7 @@ function showAddKeyModal() {
       </div>
       <div class="modal-actions">
         <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
-        <button class="btn btn-primary" onclick="addKey()">Add Key</button>
+        <button class="btn btn-primary" onclick="addKeyUnified()">Add Key</button>
       </div>
     </div>
   `;
@@ -383,37 +414,66 @@ function showAddKeyModal() {
   overlay.addEventListener('click', (e) => {
     if (e.target === overlay) overlay.remove();
   });
-  overlay.querySelector('#newKeyToken').focus();
+
+  const tokenInput = overlay.querySelector('#newKeyToken');
+  const providerSelect = overlay.querySelector('#newKeyProvider');
+  const detectedEl = overlay.querySelector('#providerDetected');
+  tokenInput.addEventListener('input', () => {
+    const detected = detectKeyProvider(tokenInput.value.trim());
+    if (detected && providerSelect.value === '') {
+      detectedEl.style.display = '';
+      detectedEl.innerHTML = 'Detected: <span class="provider-badge ' + detected + '">' + (detected === 'anthropic' ? 'Anthropic' : 'OpenAI') + '</span>';
+    } else {
+      detectedEl.style.display = 'none';
+    }
+  });
+  tokenInput.focus();
 }
 
-async function addKey() {
+async function addKeyUnified() {
   const token = document.getElementById('newKeyToken').value.trim();
   const label = document.getElementById('newKeyLabel').value.trim();
+  const providerSelect = document.getElementById('newKeyProvider').value;
 
   if (!token) {
     toast('Please enter an API key', 'error');
     return;
   }
 
-  if (!token.startsWith('sk-ant-')) {
-    toast('Invalid key format (expected sk-ant-...)', 'error');
+  const provider = providerSelect || detectKeyProvider(token);
+  if (!provider) {
+    toast('Cannot detect provider. Please select Anthropic or OpenAI.', 'error');
     return;
   }
 
-  const result = await api('/api/keys', {
-    method: 'POST',
-    body: { token, label: label || 'Unnamed Key' }
-  });
-
-  if (result.error) {
-    toast(result.error, 'error');
-    return;
+  if (provider === 'anthropic') {
+    if (!token.startsWith('sk-ant-')) {
+      toast('Anthropic keys should start with sk-ant-...', 'error');
+      return;
+    }
+    const result = await api('/api/keys', {
+      method: 'POST',
+      body: { token, label: label || 'Unnamed Key' }
+    });
+    if (result.error) { toast(result.error, 'error'); return; }
+    document.querySelector('.modal-overlay')?.remove();
+    toast(`Anthropic key added: ${result.id}`, 'success');
+    loadKeys();
+  } else {
+    const result = await api('/api/openai-keys', {
+      method: 'POST',
+      body: { token, label: label || 'Unnamed OpenAI Key' }
+    });
+    if (result.error) { toast(result.error, 'error'); return; }
+    document.querySelector('.modal-overlay')?.remove();
+    toast(`OpenAI key added: ${result.id}`, 'success');
+    loadKeys();
+    loadOpenAIKeys();
   }
-
-  document.querySelector('.modal-overlay')?.remove();
-  toast(`Key added: ${result.id}`, 'success');
-  loadKeys();
 }
+
+// Keep legacy addKey for backwards compatibility
+async function addKey() { return addKeyUnified(); }
 
 async function removeKey(id) {
   if (!confirm(`Remove key "${id}"?`)) return;
@@ -447,6 +507,7 @@ function renderOpenAIKeyItem(k, index) {
   return `
     <div class="key-item" data-key-id="${escAttr(k.id)}" data-index="${index}">
       <span class="key-priority" style="background:var(--green)">${index + 1}</span>
+      <span class="provider-badge openai">OpenAI</span>
       <div class="key-info">
         <div class="key-id">${escHtml(k.label)} <span class="text-muted text-sm">(${escHtml(k.id)})</span></div>
         <div class="key-meta">
@@ -551,6 +612,24 @@ function renderProfiles() {
           `).join('')}
           ${p.keyOrder.length === 0 ? '<div class="text-muted text-sm" style="padding:8px">(no keys)</div>' : ''}
         </div>
+
+        <div style="margin-top:12px">
+          <div class="flex-between" style="margin-bottom:4px">
+            <div style="font-size:13px;font-weight:600"><span class="provider-badge openai">OpenAI</span> Key Priority</div>
+            <div class="text-muted text-sm">${(p.openaiKeyOrder || []).length} key(s)</div>
+          </div>
+          <div class="profile-openai-key-list" data-profile-name="${escAttr(p.name)}">
+            ${(p.openaiKeyOrder || []).map((k, i) => `
+              <div class="profile-key-item" draggable="true" data-key-id="${escAttr(k)}" data-index="${i}" data-provider="openai">
+                <span class="drag-handle">⠿</span>
+                <span class="provider-badge openai" style="font-size:9px;padding:1px 5px">OpenAI</span>
+                <span class="key-label">${escHtml(state.openaiKeys?.find(x => x.id === k)?.label || k)}</span>
+                <span class="text-muted text-sm">${escHtml(k)}</span>
+              </div>
+            `).join('')}
+            ${(p.openaiKeyOrder || []).length === 0 ? '<div class="text-muted text-sm" style="padding:8px">(no OpenAI keys — add via Keys page)</div>' : ''}
+          </div>
+        </div>
       </div>
     `).join('')}
   `;
@@ -589,6 +668,33 @@ function renderProfiles() {
         const newOrder = [...list.querySelectorAll('.profile-key-item')].map(i => i.dataset.keyId);
         await api('/api/keys/reorder', { method: 'PUT', body: { profile: profileName, keyOrder: newOrder } });
         toast('Key order updated', 'success');
+        loadProfiles();
+      });
+    });
+  });
+
+  // Setup drag-and-drop for OpenAI key lists in profiles
+  document.querySelectorAll('.profile-openai-key-list').forEach(list => {
+    const profileName = list.dataset.profileName;
+    let dragItem = null;
+
+    list.querySelectorAll('.profile-key-item').forEach(item => {
+      item.addEventListener('dragstart', () => { dragItem = item; item.classList.add('dragging'); });
+      item.addEventListener('dragend', () => { item.classList.remove('dragging'); list.querySelectorAll('.profile-key-item').forEach(i => i.classList.remove('drag-over')); dragItem = null; });
+      item.addEventListener('dragover', (e) => { e.preventDefault(); if (item !== dragItem) item.classList.add('drag-over'); });
+      item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
+      item.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        item.classList.remove('drag-over');
+        if (!dragItem || dragItem === item) return;
+        const items = [...list.querySelectorAll('.profile-key-item')];
+        const fromIdx = items.indexOf(dragItem);
+        const toIdx = items.indexOf(item);
+        if (fromIdx < toIdx) item.after(dragItem);
+        else item.before(dragItem);
+        const newOrder = [...list.querySelectorAll('.profile-key-item')].map(i => i.dataset.keyId);
+        await api('/api/openai-keys/reorder', { method: 'PUT', body: { profile: profileName, openaiKeyOrder: newOrder } });
+        toast('OpenAI key order updated', 'success');
         loadProfiles();
       });
     });
@@ -732,13 +838,13 @@ function renderFallback() {
         <label class="form-label">Model Mapping (Claude → OpenAI)</label>
         <div id="modelMappingList">
           ${Object.entries(cfg.openaiModelMapping || {}).map(([from, to]) =>
-            '<div class="flex gap-8 mb-8"><input class="form-input" value="' + escAttr(from) + '" style="flex:1" disabled><span style="padding:6px">→</span><input class="form-input" value="' + escAttr(to) + '" style="flex:1" disabled><button class="btn btn-sm btn-danger" onclick="removeModelMapping(\'' + escAttr(from) + '\')">✕</button></div>'
+            '<div class="mapping-row"><span class="provider-badge anthropic" style="flex-shrink:0">Claude</span><input class="form-input mapping-from" value="' + escAttr(from) + '" style="flex:1" readonly><span class="mapping-arrow">→</span><span class="provider-badge openai" style="flex-shrink:0">OpenAI</span><input class="form-input mapping-to" value="' + escAttr(to) + '" style="flex:1" data-from="' + escAttr(from) + '" onchange="updateModelMapping(this)"><button class="btn btn-sm btn-danger" onclick="removeModelMapping(\'' + escAttr(from) + '\')">✕</button></div>'
           ).join('')}
         </div>
         <button class="btn btn-sm mt-8" onclick="showAddMappingModal()">+ Add Mapping</button>
       </div>
       <p class="text-muted text-sm mt-8">
-        When Claude keys are exhausted and OpenAI fallback is enabled, requests are translated and sent to the mapped OpenAI model.
+        Edit the OpenAI model name to change where Claude requests fall back to. When Claude keys are exhausted and OpenAI fallback is enabled, requests are translated and sent to the mapped OpenAI model.
       </p>
     </div>
   `;
@@ -941,6 +1047,16 @@ async function addModelMapping() {
   document.querySelector('.modal-overlay')?.remove();
   toast('Mapping added', 'success');
   loadConfig();
+}
+
+async function updateModelMapping(inputEl) {
+  const from = inputEl.dataset.from;
+  const to = inputEl.value.trim();
+  if (!to) { toast('Model name required', 'error'); loadConfig(); return; }
+  const cfg = state.config;
+  const mapping = { ...(cfg.openaiModelMapping || {}), [from]: to };
+  await api('/api/config', { method: 'PUT', body: { openaiModelMapping: mapping } });
+  toast(`Mapping updated: ${from} → ${to}`, 'success');
 }
 
 // ─── Render: Setup ───────────────────────────────────────────────────────────

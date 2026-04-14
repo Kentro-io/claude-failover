@@ -271,7 +271,8 @@ async function handleProxyRequest(req, res, profileName) {
             latency,
             fallback: isModelFallback ? `${originalModel} -> ${model}` : null,
             queued: queueAttempt > 0 ? queueAttempt : undefined,
-            queueTime: queueAttempt > 0 ? latency : undefined
+            queueTime: queueAttempt > 0 ? latency : undefined,
+            provider: 'anthropic'
           });
 
           const responseHeaders = {};
@@ -434,7 +435,8 @@ async function handleProxyRequest(req, res, profileName) {
     fallback: null,
     error: lastServerErrorStatus ? 'server_error_retries_exhausted' : 'all_keys_exhausted',
     queued: queueAttempt > 0 ? queueAttempt : undefined,
-    queueTime: queueAttempt > 0 ? latency : undefined
+    queueTime: queueAttempt > 0 ? latency : undefined,
+    provider: 'anthropic'
   });
 
   // If we exhausted retries due to server errors, return 502 (not 429)
