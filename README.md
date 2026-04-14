@@ -68,6 +68,77 @@ Supports both API keys (`sk-ant-api03-*`) and OAuth tokens (`sk-ant-oat01-*`) wi
 ### Zero Dependencies
 Pure Node.js — no npm packages, no supply chain risk, instant install.
 
+
+
+## Quick Update
+
+Pull latest and restart:
+
+```bash
+cd ~/.local/lib/claude-failover && git pull origin main && claude-failover stop && claude-failover start -d
+```
+
+Or fresh install:
+
+```bash
+rm -rf ~/.local/lib/claude-failover && git clone https://github.com/Kentro-io/claude-failover.git ~/.local/lib/claude-failover && ln -sf ~/.local/lib/claude-failover/bin/cli.js ~/.n/bin/claude-failover && claude-failover stop && claude-failover start -d
+```
+
+## OpenAI / GPT Fallback (NEW)
+
+claude-failover now supports automatic fallback to OpenAI models when all Claude keys are exhausted.
+
+### Setup
+
+```bash
+# Add an OpenAI API key
+claude-failover add-openai-key sk-proj-YOUR_KEY "GPT-5.4"
+
+# Or add a ChatGPT subscription OAuth token
+claude-failover add-openai-key YOUR_OAUTH_TOKEN "ChatGPT Pro"
+```
+
+Then enable fallback in `~/.config/claude-failover/config.json`:
+
+```json
+{
+  "openaiModelFallback": true,
+  "openaiModelMapping": {
+    "claude-opus-4-6": "gpt-5.4",
+    "claude-sonnet-4-6": "gpt-5.4-mini"
+  }
+}
+```
+
+### How It Works
+
+```
+Claude Code request
+  → Try Claude key 1 → rate limited
+  → Try Claude key 2 → rate limited  
+  → Queue (wait up to 90s for a key to free up)
+  → All exhausted → Translate to OpenAI format → GPT-5.4
+  → Translate response back → Claude Code gets normal Anthropic response
+```
+
+Claude Code never knows it's talking to GPT-5.4. The proxy handles all translation:
+- Request format: Anthropic Messages API → OpenAI Chat Completions
+- Response format: OpenAI → Anthropic (including streaming SSE)
+- Tool use: Anthropic tool_use blocks ↔ OpenAI tool_calls
+- Model mapping: configurable per-model
+
+### Use as Primary
+
+To use GPT-5.4 as the primary model (skip Claude entirely), configure only OpenAI keys with no Claude keys, and set `openaiModelFallback: true`.
+
+### Dashboard
+
+The dashboard at `localhost:4080/dashboard` shows:
+- 🟠 Claude keys with Anthropic badge
+- 🟢 OpenAI keys with OpenAI badge  
+- Fallback metrics (how many requests went to each provider)
+- Model mapping configuration
+
 ## CLI Reference
 
 | Command | Description |
