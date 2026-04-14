@@ -4,7 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
-const { getConfig, saveConfig, startConfigWatcher, ensureConfig, generateKeyId, detectKeyType } = require('./config');
+const { getConfig, saveConfig, startConfigWatcher, ensureConfig, generateKeyId, detectKeyType, generateOpenAIKeyId, detectOpenAIKeyType } = require('./config');
 const { log, getRecentLogs, addLogListener, removeLogListener } = require('./logger');
 const { handleProxyRequest } = require('./proxy');
 const cooldown = require('./cooldown');
@@ -303,6 +303,96 @@ async function handleAPI(req, res, profileName) {
     return;
   }
 
+  // OpenAI Keys
+  if (apiPath === '/api/openai-keys' && method === 'GET') {
+    const openaiKeys = config.openaiKeys || {};
+    const profileParam = url.searchParams.get('profile') || 'default';
+    const prof = config.profiles[profileParam] || config.profiles.default;
+    const openaiKeyOrder = (prof.openaiKeyOrder || []).length > 0
+      ? prof.openaiKeyOrder
+      : Object.keys(openaiKeys);
+
+    const keys = openaiKeyOrder
+      .filter(id => openaiKeys[id])
+      .map(id => {
+        const k = openaiKeys[id];
+        return {
+          id,
+          label: k.label,
+          type: k.type,
+          masked: maskToken(k.token),
+          addedAt: k.addedAt,
+          requests: metrics.getMetrics().byKey[id] || 0,
+          inCooldown: cooldown.isInCooldown(id, 'openai')
+        };
+      });
+    sendJSON(res, 200, { keys });
+    return;
+  }
+
+  if (apiPath === '/api/openai-keys' && method === 'POST') {
+    const body = await parseBody(req);
+    if (!body?.token) {
+      sendJSON(res, 400, { error: 'Missing token' });
+      return;
+    }
+
+    const token = body.token.trim();
+    const label = body.label || 'Unnamed OpenAI Key';
+    const type = detectOpenAIKeyType(token);
+    const id = generateOpenAIKeyId(label);
+
+    if (!config.openaiKeys) config.openaiKeys = {};
+    config.openaiKeys[id] = {
+      token,
+      label,
+      type,
+      addedAt: new Date().toISOString()
+    };
+
+    // Add to all profiles' openaiKeyOrder
+    for (const prof of Object.values(config.profiles)) {
+      if (!prof.openaiKeyOrder) prof.openaiKeyOrder = [];
+      if (!prof.openaiKeyOrder.includes(id)) {
+        prof.openaiKeyOrder.push(id);
+      }
+    }
+
+    // Enable OpenAI fallback automatically when first key is added
+    if (!config.openaiModelFallback) {
+      config.openaiModelFallback = true;
+    }
+
+    saveConfig(config);
+    log('info', `OpenAI key added: ${id} (${label})`);
+    sendJSON(res, 201, { id, label, type, masked: maskToken(token) });
+    broadcast('config', { action: 'openai-key-added', id });
+    return;
+  }
+
+  // Delete OpenAI key
+  const deleteOpenAIKeyMatch = apiPath.match(/^\/api\/openai-keys\/([^/]+)$/);
+  if (deleteOpenAIKeyMatch && method === 'DELETE') {
+    const id = decodeURIComponent(deleteOpenAIKeyMatch[1]);
+    if (!config.openaiKeys || !config.openaiKeys[id]) {
+      sendJSON(res, 404, { error: 'OpenAI key not found' });
+      return;
+    }
+
+    delete config.openaiKeys[id];
+    for (const prof of Object.values(config.profiles)) {
+      if (prof.openaiKeyOrder) {
+        prof.openaiKeyOrder = prof.openaiKeyOrder.filter(k => k !== id);
+      }
+    }
+
+    saveConfig(config);
+    log('info', `OpenAI key removed: ${id}`);
+    sendJSON(res, 200, { success: true });
+    broadcast('config', { action: 'openai-key-removed', id });
+    return;
+  }
+
   // Profiles
   if (apiPath === '/api/profiles' && method === 'GET') {
     const profiles = Object.entries(config.profiles).map(([name, p]) => ({
@@ -385,7 +475,10 @@ async function handleAPI(req, res, profileName) {
       cooldownMs: config.cooldownMs,
       queueWaitMs: config.queueWaitMs ?? 90000,
       logLevel: config.logLevel,
-      maxLogSize: config.maxLogSize
+      maxLogSize: config.maxLogSize,
+      openaiBaseUrl: config.openaiBaseUrl || 'https://api.openai.com',
+      openaiModelMapping: config.openaiModelMapping || {},
+      openaiModelFallback: config.openaiModelFallback || false
     };
     sendJSON(res, 200, safeConfig);
     return;
@@ -397,6 +490,9 @@ async function handleAPI(req, res, profileName) {
     if (body.cooldownMs !== undefined) config.cooldownMs = parseInt(body.cooldownMs, 10);
     if (body.queueWaitMs !== undefined) config.queueWaitMs = parseInt(body.queueWaitMs, 10);
     if (body.logLevel) config.logLevel = body.logLevel;
+    if (body.openaiBaseUrl !== undefined) config.openaiBaseUrl = body.openaiBaseUrl;
+    if (body.openaiModelMapping !== undefined) config.openaiModelMapping = body.openaiModelMapping;
+    if (body.openaiModelFallback !== undefined) config.openaiModelFallback = body.openaiModelFallback;
 
     saveConfig(config);
     log('info', 'Config updated via dashboard');
@@ -493,8 +589,17 @@ function buildStatus(config, profileName) {
       type: k.type,
       inCooldown: cooldown.isInCooldown(id)
     })),
+    openaiKeys: Object.entries(config.openaiKeys || {}).map(([id, k]) => ({
+      id,
+      label: k.label,
+      type: k.type,
+      inCooldown: cooldown.isInCooldown(id, 'openai')
+    })),
+    openaiModelFallback: config.openaiModelFallback || false,
+    openaiModelMapping: config.openaiModelMapping || {},
     profiles: Object.entries(config.profiles).map(([name, p]) => ({
-      name, port: p.port, keyCount: p.keyOrder.length
+      name, port: p.port, keyCount: p.keyOrder.length,
+      openaiKeyCount: (p.openaiKeyOrder || []).length
     }))
   };
 }

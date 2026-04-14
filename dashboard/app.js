@@ -6,6 +6,7 @@
 let state = {
   status: null,
   keys: [],
+  openaiKeys: [],
   profiles: [],
   config: null,
   setupStatus: null,
@@ -106,6 +107,12 @@ async function loadProfiles() {
   if (state.currentPage === 'profiles') renderProfiles();
 }
 
+async function loadOpenAIKeys() {
+  const data = await api('/api/openai-keys');
+  state.openaiKeys = data.keys || [];
+  if (state.currentPage === 'keys') renderKeys();
+}
+
 async function loadConfig() {
   state.config = await api('/api/config');
   if (state.currentPage === 'fallback') renderFallback();
@@ -149,7 +156,7 @@ function navigateTo(page) {
 
   const renderers = {
     status: () => { loadStatus(); renderStatus(); },
-    keys: () => { loadKeys(); renderKeys(); },
+    keys: () => { loadKeys(); loadOpenAIKeys(); renderKeys(); },
     profiles: () => { loadProfiles(); renderProfiles(); },
     fallback: () => { loadConfig(); renderFallback(); },
     setup: () => { loadSetupStatus(); renderSetup(); },
@@ -293,7 +300,7 @@ function renderKeys() {
     ` : `
       <div class="card">
         <div class="flex-between mb-16">
-          <div class="card-title">Key Priority Order</div>
+          <div class="card-title">Anthropic Key Priority Order</div>
           <div class="flex gap-8">
             <select class="form-select" id="keyProfileSelect" style="width:auto;padding:4px 8px;font-size:11px" onchange="loadKeys()">
               ${profileSelect.map(p => `<option value="${p}">${p}</option>`).join('')}
@@ -305,7 +312,25 @@ function renderKeys() {
         </div>
       </div>
     `}
+
   `;
+
+  // Append OpenAI keys section
+  const openaiKeys = state.openaiKeys || [];
+  let openaiHtml = `
+    <div class="flex-between mb-16 mt-16">
+      <h2 class="page-title" style="margin-bottom:0;font-size:16px">OpenAI Keys (Cross-Provider Fallback)</h2>
+      <button class="btn btn-primary" onclick="showAddOpenAIKeyModal()">+ Add OpenAI Key</button>
+    </div>
+  `;
+  if (openaiKeys.length === 0) {
+    openaiHtml += '<div class="empty-state"><div class="empty-state-text">No OpenAI keys configured. Add one to enable cross-provider fallback.</div></div>';
+  } else {
+    openaiHtml += '<div class="card"><div id="openaiKeyList">' +
+      openaiKeys.map((k, i) => renderOpenAIKeyItem(k, i)).join('') +
+      '</div></div>';
+  }
+  content.innerHTML += openaiHtml;
 
   // Setup drag and drop
   setupDragDrop();
@@ -414,6 +439,84 @@ async function testKey(id) {
   setTimeout(() => {
     if (btn) { btn.textContent = 'Test'; btn.disabled = false; }
   }, 2000);
+}
+
+// ─── Render: OpenAI Keys ─────────────────────────────────────────────────────
+
+function renderOpenAIKeyItem(k, index) {
+  return `
+    <div class="key-item" data-key-id="${escAttr(k.id)}" data-index="${index}">
+      <span class="key-priority" style="background:var(--green)">${index + 1}</span>
+      <div class="key-info">
+        <div class="key-id">${escHtml(k.label)} <span class="text-muted text-sm">(${escHtml(k.id)})</span></div>
+        <div class="key-meta">
+          ${escHtml(k.masked)} · ${escHtml(k.type)} · ${k.requests} requests
+          ${k.inCooldown ? '<span class="badge badge-amber">cooldown</span>' : '<span class="badge badge-green">ready</span>'}
+        </div>
+      </div>
+      <div class="key-actions">
+        <button class="btn btn-sm btn-danger" onclick="removeOpenAIKey('${escAttr(k.id)}')">Remove</button>
+      </div>
+    </div>
+  `;
+}
+
+function showAddOpenAIKeyModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <div class="modal-title">Add OpenAI Key</div>
+      <div class="form-group">
+        <label class="form-label">API Key or OAuth Token</label>
+        <input class="form-input" id="newOpenAIKeyToken" placeholder="sk-..." autocomplete="off">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Label</label>
+        <input class="form-input" id="newOpenAIKeyLabel" placeholder="e.g., OpenAI Account">
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="addOpenAIKey()">Add Key</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) overlay.remove();
+  });
+  overlay.querySelector('#newOpenAIKeyToken').focus();
+}
+
+async function addOpenAIKey() {
+  const token = document.getElementById('newOpenAIKeyToken').value.trim();
+  const label = document.getElementById('newOpenAIKeyLabel').value.trim();
+
+  if (!token) {
+    toast('Please enter an API key', 'error');
+    return;
+  }
+
+  const result = await api('/api/openai-keys', {
+    method: 'POST',
+    body: { token, label: label || 'Unnamed OpenAI Key' }
+  });
+
+  if (result.error) {
+    toast(result.error, 'error');
+    return;
+  }
+
+  document.querySelector('.modal-overlay')?.remove();
+  toast(`OpenAI key added: ${result.id}`, 'success');
+  loadOpenAIKeys();
+}
+
+async function removeOpenAIKey(id) {
+  if (!confirm(`Remove OpenAI key "${id}"?`)) return;
+  await api(`/api/openai-keys/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  toast('OpenAI key removed', 'success');
+  loadOpenAIKeys();
 }
 
 // ─── Render: Profiles ────────────────────────────────────────────────────────
@@ -609,6 +712,35 @@ function renderFallback() {
         How long to wait before retrying a rate-limited key. The proxy respects retry-after headers when shorter.
       </p>
     </div>
+
+    <div class="card">
+      <div class="card-title">OpenAI Cross-Provider Fallback</div>
+      <div class="form-group mt-8">
+        <label class="form-label" style="display:flex;align-items:center;gap:8px">
+          <input type="checkbox" id="openaiEnabled" ${cfg.openaiModelFallback ? 'checked' : ''} onchange="toggleOpenAIFallback(this.checked)">
+          Enable OpenAI fallback when all Claude keys are exhausted
+        </label>
+      </div>
+      <div class="form-group mt-16">
+        <label class="form-label">OpenAI Base URL</label>
+        <div class="flex gap-8">
+          <input class="form-input" id="openaiBaseUrl" value="${escAttr(cfg.openaiBaseUrl || 'https://api.openai.com')}" style="flex:1">
+          <button class="btn" onclick="saveOpenAIBaseUrl()">Save</button>
+        </div>
+      </div>
+      <div class="form-group mt-16">
+        <label class="form-label">Model Mapping (Claude → OpenAI)</label>
+        <div id="modelMappingList">
+          ${Object.entries(cfg.openaiModelMapping || {}).map(([from, to]) =>
+            '<div class="flex gap-8 mb-8"><input class="form-input" value="' + escAttr(from) + '" style="flex:1" disabled><span style="padding:6px">→</span><input class="form-input" value="' + escAttr(to) + '" style="flex:1" disabled><button class="btn btn-sm btn-danger" onclick="removeModelMapping(\'' + escAttr(from) + '\')">✕</button></div>'
+          ).join('')}
+        </div>
+        <button class="btn btn-sm mt-8" onclick="showAddMappingModal()">+ Add Mapping</button>
+      </div>
+      <p class="text-muted text-sm mt-8">
+        When Claude keys are exhausted and OpenAI fallback is enabled, requests are translated and sent to the mapped OpenAI model.
+      </p>
+    </div>
   `;
 
   setupFallbackDragDrop();
@@ -752,6 +884,63 @@ async function saveCooldownSettings() {
   if (isNaN(min) || min < 1) { toast('Invalid duration', 'error'); return; }
   await api('/api/config', { method: 'PUT', body: { cooldownMs: min * 60000 } });
   toast('Cooldown settings saved', 'success');
+}
+
+async function toggleOpenAIFallback(enabled) {
+  await api('/api/config', { method: 'PUT', body: { openaiModelFallback: enabled } });
+  toast(enabled ? 'OpenAI fallback enabled' : 'OpenAI fallback disabled', 'success');
+}
+
+async function saveOpenAIBaseUrl() {
+  const url = document.getElementById('openaiBaseUrl').value.trim();
+  if (!url) { toast('URL required', 'error'); return; }
+  await api('/api/config', { method: 'PUT', body: { openaiBaseUrl: url } });
+  toast('OpenAI base URL saved', 'success');
+}
+
+async function removeModelMapping(from) {
+  const cfg = state.config;
+  const mapping = { ...(cfg.openaiModelMapping || {}) };
+  delete mapping[from];
+  await api('/api/config', { method: 'PUT', body: { openaiModelMapping: mapping } });
+  toast('Mapping removed', 'success');
+  loadConfig();
+}
+
+function showAddMappingModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML = `
+    <div class="modal">
+      <div class="modal-title">Add Model Mapping</div>
+      <div class="form-group">
+        <label class="form-label">Claude Model</label>
+        <input class="form-input" id="mappingFrom" placeholder="e.g., claude-opus-4-6">
+      </div>
+      <div class="form-group">
+        <label class="form-label">OpenAI Model</label>
+        <input class="form-input" id="mappingTo" placeholder="e.g., gpt-4.1">
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+        <button class="btn btn-primary" onclick="addModelMapping()">Add</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#mappingFrom').focus();
+}
+
+async function addModelMapping() {
+  const from = document.getElementById('mappingFrom').value.trim();
+  const to = document.getElementById('mappingTo').value.trim();
+  if (!from || !to) { toast('Both models required', 'error'); return; }
+  const cfg = state.config;
+  const mapping = { ...(cfg.openaiModelMapping || {}), [from]: to };
+  await api('/api/config', { method: 'PUT', body: { openaiModelMapping: mapping } });
+  document.querySelector('.modal-overlay')?.remove();
+  toast('Mapping added', 'success');
+  loadConfig();
 }
 
 // ─── Render: Setup ───────────────────────────────────────────────────────────
@@ -960,6 +1149,7 @@ function requestInfoBadges(r) {
   const parts = [];
   if (r.fallback) parts.push(`<span class="badge badge-amber">${escHtml(r.fallback)}</span>`);
   if (r.queued) parts.push(`<span class="badge badge-cyan" title="Request was held and retried">queued ${r.queued}x</span>`);
+  if (r.provider === 'openai') parts.push('<span class="badge badge-green">OpenAI</span>');
   if (r.error === 'all_keys_exhausted') parts.push('<span class="badge badge-red">rate limit</span>');
   if (r.error === 'server_error_retries_exhausted') parts.push('<span class="badge badge-red">server error</span>');
   return parts.length > 0 ? parts.join(' ') : '—';

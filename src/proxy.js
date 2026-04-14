@@ -6,6 +6,7 @@ const { getConfig } = require('./config');
 const { log } = require('./logger');
 const cooldown = require('./cooldown');
 const metrics = require('./metrics');
+const { handleViaOpenAI } = require('./adapter-openai');
 
 const UPSTREAM = 'https://api.anthropic.com';
 
@@ -341,7 +342,85 @@ async function handleProxyRequest(req, res, profileName) {
     await new Promise(r => setTimeout(r, cappedWait));
   }
 
-  // ── All retries and queue attempts exhausted ──
+  // ── All Claude retries and queue attempts exhausted — try OpenAI fallback ──
+  if (config.openaiModelFallback && parsedBody) {
+    const openaiKeyOrder = (profile.openaiKeyOrder || []).length > 0
+      ? profile.openaiKeyOrder
+      : Object.keys(config.openaiKeys || {});
+    const openaiBaseUrl = config.openaiBaseUrl || 'https://api.openai.com';
+    const mapping = config.openaiModelMapping || {};
+    const targetModel = mapping[originalModel] || mapping['*'] || originalModel;
+
+    for (const keyId of openaiKeyOrder) {
+      if (cooldown.isInCooldown(keyId, 'openai')) continue;
+
+      const keyEntry = config.openaiKeys[keyId];
+      if (!keyEntry?.token) continue;
+
+      try {
+        log('info', 'OpenAI fallback attempt', {
+          key: keyId, claudeModel: originalModel, openaiModel: targetModel,
+          profile: profileName
+        });
+
+        const result = await handleViaOpenAI(
+          parsedBody, targetModel, openaiBaseUrl, keyEntry.token, res
+        );
+
+        if (result.success) {
+          const latency = Date.now() - startTime;
+          metrics.recordSuccess(keyId, targetModel);
+          metrics.recordModelFallback();
+          metrics.addRecentRequest({
+            method: req.method,
+            path: req.url,
+            model: targetModel,
+            key: keyId,
+            status: 200,
+            latency,
+            fallback: `${originalModel} -> ${targetModel} (OpenAI)`,
+            provider: 'openai'
+          });
+          log('info', `OpenAI fallback SUCCESS: ${originalModel} -> ${targetModel}`, {
+            key: keyId, latency, profile: profileName
+          });
+          return;
+        }
+
+        // Handle OpenAI errors with cooldowns
+        if (result.statusCode === 429) {
+          const cd = cooldown.setCooldown(keyId, 'openai', result.retryAfter || 30, 60000);
+          metrics.recordRetry();
+          log('warn', 'OpenAI 429 rate limited', { key: keyId, model: targetModel });
+          continue;
+        }
+        if (result.statusCode === 401 || result.statusCode === 403) {
+          cooldown.setCooldown(keyId, null, 300, 300000);
+          log('warn', `OpenAI ${result.statusCode} auth error`, { key: keyId });
+          continue;
+        }
+        if (result.statusCode === 404) {
+          log('warn', 'OpenAI 404 — model not found', { key: keyId, model: targetModel });
+          continue;
+        }
+        // Other errors
+        log('warn', `OpenAI error ${result.statusCode}`, { key: keyId, model: targetModel });
+        continue;
+
+      } catch (err) {
+        log('error', 'OpenAI fallback request failed', {
+          key: keyId, model: targetModel, error: err.message
+        });
+        continue;
+      }
+    }
+
+    log('warn', 'OpenAI fallback exhausted — all OpenAI keys failed', {
+      profile: profileName, model: originalModel
+    });
+  }
+
+  // ── All retries exhausted (Claude + OpenAI) ──
   metrics.recordFailure();
   const latency = Date.now() - startTime;
 

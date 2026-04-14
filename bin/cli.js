@@ -7,7 +7,7 @@ const fs = require('fs');
 
 // Resolve src modules
 const srcDir = path.join(__dirname, '..', 'src');
-const { ensureConfig, getConfig, saveConfig, CONFIG_PATH, CONFIG_DIR, generateKeyId, detectKeyType } = require(path.join(srcDir, 'config'));
+const { ensureConfig, getConfig, saveConfig, CONFIG_PATH, CONFIG_DIR, generateKeyId, detectKeyType, generateOpenAIKeyId, detectOpenAIKeyType } = require(path.join(srcDir, 'config'));
 const { getDaemonStatus, startDaemon, stopDaemon, installLaunchAgent, uninstallLaunchAgent } = require(path.join(srcDir, 'daemon'));
 const { detectTools, setupShell, setupClaudeCode, setupCursor } = require(path.join(srcDir, 'setup'));
 const { getLogPath } = require(path.join(srcDir, 'logger'));
@@ -221,6 +221,54 @@ async function cmdAddKey(args) {
   info(`Masked: ${maskToken(token)}`);
 }
 
+async function cmdAddOpenAIKey(args) {
+  ensureConfig();
+
+  let token, label;
+
+  if (args.length >= 1) {
+    token = args[0];
+    label = args.slice(1).join(' ') || undefined;
+  } else {
+    token = await readStdin(`${c.blue}OpenAI API key or OAuth token: ${c.reset}`);
+    if (!token) {
+      error('No token provided');
+      process.exit(1);
+    }
+  }
+
+  if (!label) {
+    label = await readStdin(`${c.blue}Label (optional): ${c.reset}`);
+  }
+
+  const config = getConfig();
+  const type = detectOpenAIKeyType(token);
+  const id = generateOpenAIKeyId(label || 'key');
+
+  if (!config.openaiKeys) config.openaiKeys = {};
+  config.openaiKeys[id] = {
+    token,
+    label: label || 'Unnamed OpenAI Key',
+    type,
+    addedAt: new Date().toISOString()
+  };
+
+  for (const prof of Object.values(config.profiles)) {
+    if (!prof.openaiKeyOrder) prof.openaiKeyOrder = [];
+    prof.openaiKeyOrder.push(id);
+  }
+
+  // Enable OpenAI fallback automatically
+  if (!config.openaiModelFallback) {
+    config.openaiModelFallback = true;
+  }
+
+  saveConfig(config);
+  success(`OpenAI key added: ${c.cyan}${id}${c.reset} (${type})`);
+  info(`Masked: ${maskToken(token)}`);
+  info('OpenAI model fallback has been enabled');
+}
+
 function cmdRemoveKey(args) {
   if (!args[0]) {
     error('Usage: claude-failover remove-key <key-id>');
@@ -271,9 +319,39 @@ function cmdListKeys() {
     print();
   }
 
+  // OpenAI keys
+  const openaiKeys = config.openaiKeys || {};
+  if (Object.keys(openaiKeys).length > 0) {
+    print(`${c.bold}OpenAI Keys${c.reset}`);
+    print();
+    for (const [id, k] of Object.entries(openaiKeys)) {
+      print(`  ${c.cyan}${id}${c.reset}`);
+      print(`    Label: ${k.label}`);
+      print(`    Type:  ${k.type}`);
+      print(`    Token: ${c.dim}${maskToken(k.token)}${c.reset}`);
+      print(`    Added: ${k.addedAt || 'unknown'}`);
+      print();
+    }
+  }
+
   print(`${c.bold}Profile Key Orders${c.reset}`);
   for (const [name, prof] of Object.entries(config.profiles)) {
     print(`  ${c.cyan}${name}${c.reset} (port ${prof.port}): ${prof.keyOrder.join(' → ') || '(empty)'}`);
+    if (prof.openaiKeyOrder && prof.openaiKeyOrder.length > 0) {
+      print(`    OpenAI: ${prof.openaiKeyOrder.join(' → ')}`);
+    }
+  }
+
+  if (config.openaiModelFallback) {
+    print();
+    info(`OpenAI fallback: ${c.green}enabled${c.reset}`);
+    const mapping = config.openaiModelMapping || {};
+    if (Object.keys(mapping).length > 0) {
+      print(`  Model mapping:`);
+      for (const [from, to] of Object.entries(mapping)) {
+        print(`    ${from} → ${c.cyan}${to}${c.reset}`);
+      }
+    }
   }
 }
 
@@ -450,7 +528,8 @@ ${c.bold}COMMANDS${c.reset}
   ${c.cyan}start -d${c.reset}           Start as background daemon
   ${c.cyan}stop${c.reset}               Stop the daemon
   ${c.cyan}status${c.reset}             Show proxy status and metrics
-  ${c.cyan}add-key${c.reset} [token]    Add an API key
+  ${c.cyan}add-key${c.reset} [token]    Add an Anthropic API key
+  ${c.cyan}add-openai-key${c.reset} [token]  Add an OpenAI API key (enables cross-provider fallback)
   ${c.cyan}remove-key${c.reset} <id>    Remove an API key
   ${c.cyan}list-keys${c.reset}          List configured keys
   ${c.cyan}setup${c.reset}              Auto-configure tools (shell, Claude Code, Cursor)
@@ -494,6 +573,7 @@ const commands = {
   stop: cmdStop,
   status: cmdStatus,
   'add-key': cmdAddKey,
+  'add-openai-key': cmdAddOpenAIKey,
   'remove-key': cmdRemoveKey,
   'list-keys': cmdListKeys,
   setup: cmdSetup,

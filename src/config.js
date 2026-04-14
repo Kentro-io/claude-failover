@@ -13,10 +13,19 @@ const DEFAULT_CONFIG = {
   profiles: {
     default: {
       port: 4080,
-      keyOrder: []
+      keyOrder: [],
+      openaiKeyOrder: []
     }
   },
   keys: {},
+  openaiKeys: {},
+  openaiBaseUrl: 'https://api.openai.com',
+  openaiModelMapping: {
+    'claude-opus-4-6': 'gpt-4.1',
+    'claude-sonnet-4-6': 'gpt-4.1-mini',
+    'claude-haiku-4-5-20251001': 'gpt-4.1-nano'
+  },
+  openaiModelFallback: false,
   modelFallback: {
     'claude-opus-4-6': 'claude-sonnet-4-6',
     'claude-opus-4-5-20250414': 'claude-sonnet-4-5-20250414'
@@ -58,7 +67,9 @@ function loadConfig() {
     ...DEFAULT_CONFIG,
     ...parsed,
     profiles: { ...DEFAULT_CONFIG.profiles, ...parsed.profiles },
-    modelFallback: { ...DEFAULT_CONFIG.modelFallback, ...parsed.modelFallback }
+    modelFallback: { ...DEFAULT_CONFIG.modelFallback, ...parsed.modelFallback },
+    openaiKeys: { ...parsed.openaiKeys },
+    openaiModelMapping: { ...DEFAULT_CONFIG.openaiModelMapping, ...parsed.openaiModelMapping }
   };
   return currentConfig;
 }
@@ -124,6 +135,23 @@ function detectKeyType(token) {
   return 'api-key';
 }
 
+function detectOpenAIKeyType(token) {
+  if (token.startsWith('sk-')) return 'api_key';
+  return 'oauth_token';
+}
+
+function generateOpenAIKeyId(label) {
+  const base = 'openai-' + (label || 'key').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const cfg = getConfig();
+  let id = base;
+  let i = 2;
+  while (cfg.openaiKeys[id]) {
+    id = `${base}-${i}`;
+    i++;
+  }
+  return id;
+}
+
 module.exports = {
   CONFIG_DIR,
   CONFIG_PATH,
@@ -138,5 +166,7 @@ module.exports = {
   stopConfigWatcher,
   onConfigChange,
   generateKeyId,
-  detectKeyType
+  detectKeyType,
+  generateOpenAIKeyId,
+  detectOpenAIKeyType
 };
