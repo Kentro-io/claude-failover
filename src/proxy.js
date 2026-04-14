@@ -7,6 +7,7 @@ const { log } = require('./logger');
 const cooldown = require('./cooldown');
 const metrics = require('./metrics');
 const { handleViaOpenAI } = require('./adapter-openai');
+const { buildPriorityOrder, decodePriorityItem } = require('./profile-order');
 
 const UPSTREAM = 'https://api.anthropic.com';
 
@@ -88,7 +89,14 @@ function consumeResponse(res) {
 async function handleProxyRequest(req, res, profileName) {
   const config = getConfig();
   const profile = config.profiles[profileName] || config.profiles.default;
-  const keyOrder = profile.keyOrder || [];
+  const priorityItems = buildPriorityOrder(profile, config)
+    .map(decodePriorityItem)
+    .filter(Boolean)
+    .filter(item => item.provider === 'openai'
+      ? Boolean(config.openaiKeys?.[item.id]?.token)
+      : Boolean(config.keys?.[item.id]?.token));
+  const anthropicKeyOrder = priorityItems.filter(item => item.provider === 'anthropic').map(item => item.id);
+  const allPriorityKeyIds = priorityItems.map(item => item.id);
 
   metrics.recordRequest();
 
@@ -105,10 +113,10 @@ async function handleProxyRequest(req, res, profileName) {
 
   // ── Non-model requests: passthrough with first available key, no fallback ──
   if (!originalModel) {
-    const firstKeyId = keyOrder.find(id => config.keys[id]?.token);
+    const firstKeyId = anthropicKeyOrder.find(id => config.keys[id]?.token);
     if (!firstKeyId) {
       res.writeHead(502, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'No keys configured' }));
+      res.end(JSON.stringify({ error: 'No Anthropic keys configured for non-model request' }));
       return;
     }
     try {
@@ -164,141 +172,250 @@ async function handleProxyRequest(req, res, profileName) {
 
     for (const model of modelChain) {
       const isModelFallback = model !== originalModel;
+      let advanceToNextModel = false;
 
-      for (const keyId of keyOrder) {
-        if (cooldown.isInCooldown(keyId, model)) {
-          log('debug', `Skipping ${keyId} for ${model} (in cooldown)`);
-          continue;
+      for (const item of priorityItems) {
+        const keyId = item.id;
+        const provider = item.provider;
+        const openaiTargetModel = (config.openaiModelMapping || {})[model]
+          || (config.openaiModelMapping || {})['*']
+          || model;
+
+        if (provider === 'anthropic') {
+          if (cooldown.isInCooldown(keyId, model)) {
+            log('debug', `Skipping ${keyId} for ${model} (in cooldown)`);
+            continue;
+          }
+
+          const keyEntry = config.keys[keyId];
+          if (!keyEntry?.token) continue;
+
+          attempted++;
+
+          let requestBody = body;
+          if (isModelFallback && parsedBody) {
+            requestBody = Buffer.from(JSON.stringify({ ...parsedBody, model }));
+          }
+
+          try {
+            const proxyRes = await proxyRequest(
+              req.url, req.method, req.headers, requestBody, keyEntry.token
+            );
+
+            if (proxyRes.statusCode === 429) {
+              const retryAfter = parseInt(proxyRes.headers['retry-after'], 10) || null;
+              const cooldownSec = retryAfter || 30;
+              const cd = cooldown.setCooldown(keyId, model, cooldownSec, 60000);
+              metrics.recordRetry();
+              await consumeResponse(proxyRes);
+              log('warn', '429 rate limited', {
+                key: keyId, model, retryAfter, cooldownSec, profile: profileName,
+                cooldownUntil: cd.until, rateLimit: true
+              });
+              continue;
+            }
+
+            if (proxyRes.statusCode === 529) {
+              cooldown.setCooldown(keyId, model, 10, 30000);
+              metrics.recordRetry();
+              await consumeResponse(proxyRes);
+              log('warn', '529 overloaded', { key: keyId, model, rateLimit: true });
+              continue;
+            }
+
+            if (proxyRes.statusCode === 404) {
+              await consumeResponse(proxyRes);
+              log('warn', '404 not found — key may lack model access', {
+                key: keyId, model, path: req.url
+              });
+              continue;
+            }
+
+            if (proxyRes.statusCode === 401 || proxyRes.statusCode === 403) {
+              cooldown.setCooldown(keyId, null, 300, 300000);
+              await consumeResponse(proxyRes);
+              log('warn', `${proxyRes.statusCode} auth error — blanket cooldown`, {
+                key: keyId, model
+              });
+              continue;
+            }
+
+            if (RETRYABLE_SERVER_ERRORS.has(proxyRes.statusCode)) {
+              serverErrorRetries++;
+              lastServerErrorStatus = proxyRes.statusCode;
+              metrics.recordRetry();
+              await consumeResponse(proxyRes);
+
+              if (serverErrorRetries >= MAX_SERVER_ERROR_RETRIES) {
+                log('warn', `${proxyRes.statusCode} server error — exhausted ${MAX_SERVER_ERROR_RETRIES} retries, trying model fallback`, {
+                  key: keyId, model, retries: serverErrorRetries
+                });
+                advanceToNextModel = true;
+                break;
+              }
+
+              log('warn', `${proxyRes.statusCode} server error (retry ${serverErrorRetries}/${MAX_SERVER_ERROR_RETRIES})`, {
+                key: keyId, model
+              });
+              continue;
+            }
+
+            const latency = Date.now() - startTime;
+            metrics.recordSuccess(keyId, model);
+
+            if (isModelFallback) {
+              metrics.recordModelFallback();
+              log('info', `Model fallback: ${originalModel} -> ${model}`, {
+                key: keyId, profile: profileName
+              });
+            }
+
+            if (queueAttempt > 0) {
+              log('info', `QUEUE SUCCESS — request delivered after ${queueAttempt} queue attempt(s), ${Math.ceil(latency / 1000)}s total wait`, {
+                key: keyId, model, profile: profileName,
+                queueAttempts: queueAttempt, queued: true
+              });
+            }
+
+            metrics.addRecentRequest({
+              method: req.method,
+              path: req.url,
+              model: model || 'unknown',
+              key: keyId,
+              status: proxyRes.statusCode,
+              latency,
+              fallback: isModelFallback ? `${originalModel} -> ${model}` : null,
+              queued: queueAttempt > 0 ? queueAttempt : undefined,
+              queueTime: queueAttempt > 0 ? latency : undefined,
+              provider: 'anthropic'
+            });
+
+            const responseHeaders = {};
+            for (const [k, v] of Object.entries(proxyRes.headers)) {
+              responseHeaders[k] = v;
+            }
+            responseHeaders['x-proxy-key'] = keyId;
+            responseHeaders['x-proxy-model'] = model || 'unknown';
+            responseHeaders['x-proxy-provider'] = 'anthropic';
+            if (isModelFallback) {
+              responseHeaders['x-proxy-fallback'] = `${originalModel} -> ${model}`;
+            }
+            if (queueAttempt > 0) {
+              responseHeaders['x-proxy-queued'] = String(queueAttempt);
+            }
+
+            res.writeHead(proxyRes.statusCode, responseHeaders);
+            proxyRes.pipe(res);
+            return;
+
+          } catch (err) {
+            lastError = err;
+            log('error', 'Proxy request failed', {
+              key: keyId, model, error: err.message
+            });
+            continue;
+          }
         }
 
-        const keyEntry = config.keys[keyId];
+        if (!config.openaiModelFallback) continue;
+        if (cooldown.isInCooldown(keyId, 'openai')) continue;
+
+        const keyEntry = config.openaiKeys[keyId];
         if (!keyEntry?.token) continue;
 
         attempted++;
 
-        let requestBody = body;
-        if (isModelFallback && parsedBody) {
-          requestBody = Buffer.from(JSON.stringify({ ...parsedBody, model }));
-        }
-
         try {
-          const proxyRes = await proxyRequest(
-            req.url, req.method, req.headers, requestBody, keyEntry.token
+          const openaiBody = isModelFallback && parsedBody
+            ? { ...parsedBody, model }
+            : parsedBody;
+
+          const result = await handleViaOpenAI(
+            openaiBody, openaiTargetModel, config.openaiBaseUrl || 'https://api.openai.com', keyEntry.token, res
           );
 
-          if (proxyRes.statusCode === 429) {
-            const retryAfter = parseInt(proxyRes.headers['retry-after'], 10) || null;
-            const cooldownSec = retryAfter || 30;
-            const cd = cooldown.setCooldown(keyId, model, cooldownSec, 60000);
-            metrics.recordRetry();
-            await consumeResponse(proxyRes);
-            log('warn', '429 rate limited', {
-              key: keyId, model, retryAfter, cooldownSec, profile: profileName,
-              cooldownUntil: cd.until, rateLimit: true
-            });
-            continue;
-          }
+          if (result.success) {
+            const latency = Date.now() - startTime;
+            metrics.recordSuccess(keyId, openaiTargetModel);
 
-          if (proxyRes.statusCode === 529) {
-            cooldown.setCooldown(keyId, model, 10, 30000);
-            metrics.recordRetry();
-            await consumeResponse(proxyRes);
-            log('warn', '529 overloaded', { key: keyId, model, rateLimit: true });
-            continue;
-          }
-
-          if (proxyRes.statusCode === 404) {
-            await consumeResponse(proxyRes);
-            log('warn', '404 not found — key may lack model access', {
-              key: keyId, model, path: req.url
-            });
-            continue;
-          }
-
-          if (proxyRes.statusCode === 401 || proxyRes.statusCode === 403) {
-            cooldown.setCooldown(keyId, null, 300, 300000);
-            await consumeResponse(proxyRes);
-            log('warn', `${proxyRes.statusCode} auth error — blanket cooldown`, {
-              key: keyId, model
-            });
-            continue;
-          }
-
-          // ── 500/502/503: retry up to 3 times across keys, then try model fallback ──
-          if (RETRYABLE_SERVER_ERRORS.has(proxyRes.statusCode)) {
-            serverErrorRetries++;
-            lastServerErrorStatus = proxyRes.statusCode;
-            metrics.recordRetry();
-            await consumeResponse(proxyRes);
-
-            if (serverErrorRetries >= MAX_SERVER_ERROR_RETRIES) {
-              log('warn', `${proxyRes.statusCode} server error — exhausted ${MAX_SERVER_ERROR_RETRIES} retries, trying model fallback`, {
-                key: keyId, model, retries: serverErrorRetries
+            if (isModelFallback) {
+              metrics.recordModelFallback();
+              log('info', `Model fallback: ${originalModel} -> ${model} via OpenAI ${openaiTargetModel}`, {
+                key: keyId, profile: profileName
               });
-              break; // break key loop, try next model in fallback chain
             }
 
-            log('warn', `${proxyRes.statusCode} server error (retry ${serverErrorRetries}/${MAX_SERVER_ERROR_RETRIES})`, {
-              key: keyId, model
+            if (queueAttempt > 0) {
+              log('info', `QUEUE SUCCESS — request delivered after ${queueAttempt} queue attempt(s), ${Math.ceil(latency / 1000)}s total wait`, {
+                key: keyId, model: openaiTargetModel, profile: profileName,
+                queueAttempts: queueAttempt, queued: true, provider: 'openai'
+              });
+            }
+
+            metrics.addRecentRequest({
+              method: req.method,
+              path: req.url,
+              model: openaiTargetModel,
+              key: keyId,
+              status: 200,
+              latency,
+              fallback: isModelFallback ? `${originalModel} -> ${model} -> ${openaiTargetModel}` : null,
+              queued: queueAttempt > 0 ? queueAttempt : undefined,
+              queueTime: queueAttempt > 0 ? latency : undefined,
+              provider: 'openai'
             });
-            continue; // try next key
+            return;
           }
 
-          // ── Success (or non-retryable error like 400) — pipe through ──
-          const latency = Date.now() - startTime;
-          metrics.recordSuccess(keyId, model);
+          if (result.statusCode === 429) {
+            cooldown.setCooldown(keyId, 'openai', result.retryAfter || 30, 60000);
+            metrics.recordRetry();
+            log('warn', 'OpenAI 429 rate limited', { key: keyId, model: openaiTargetModel, rateLimit: true });
+            continue;
+          }
 
-          if (isModelFallback) {
-            metrics.recordModelFallback();
-            log('info', `Model fallback: ${originalModel} -> ${model}`, {
-              key: keyId, profile: profileName
+          if (result.statusCode === 401 || result.statusCode === 403) {
+            cooldown.setCooldown(keyId, null, 300, 300000);
+            log('warn', `OpenAI ${result.statusCode} auth error`, { key: keyId, model: openaiTargetModel });
+            continue;
+          }
+
+          if (result.statusCode === 404) {
+            log('warn', 'OpenAI 404 — model not found', { key: keyId, model: openaiTargetModel });
+            continue;
+          }
+
+          if (RETRYABLE_SERVER_ERRORS.has(result.statusCode)) {
+            serverErrorRetries++;
+            lastServerErrorStatus = result.statusCode;
+            metrics.recordRetry();
+
+            if (serverErrorRetries >= MAX_SERVER_ERROR_RETRIES) {
+              log('warn', `OpenAI ${result.statusCode} server error — exhausted ${MAX_SERVER_ERROR_RETRIES} retries, trying model fallback`, {
+                key: keyId, model: openaiTargetModel, retries: serverErrorRetries
+              });
+              advanceToNextModel = true;
+              break;
+            }
+
+            log('warn', `OpenAI ${result.statusCode} server error (retry ${serverErrorRetries}/${MAX_SERVER_ERROR_RETRIES})`, {
+              key: keyId, model: openaiTargetModel
             });
+            continue;
           }
 
-          if (queueAttempt > 0) {
-            log('info', `QUEUE SUCCESS — request delivered after ${queueAttempt} queue attempt(s), ${Math.ceil(latency / 1000)}s total wait`, {
-              key: keyId, model, profile: profileName,
-              queueAttempts: queueAttempt, queued: true
-            });
-          }
-
-          metrics.addRecentRequest({
-            method: req.method,
-            path: req.url,
-            model: model || 'unknown',
-            key: keyId,
-            status: proxyRes.statusCode,
-            latency,
-            fallback: isModelFallback ? `${originalModel} -> ${model}` : null,
-            queued: queueAttempt > 0 ? queueAttempt : undefined,
-            queueTime: queueAttempt > 0 ? latency : undefined,
-            provider: 'anthropic'
-          });
-
-          const responseHeaders = {};
-          for (const [k, v] of Object.entries(proxyRes.headers)) {
-            responseHeaders[k] = v;
-          }
-          responseHeaders['x-proxy-key'] = keyId;
-          responseHeaders['x-proxy-model'] = model || 'unknown';
-          if (isModelFallback) {
-            responseHeaders['x-proxy-fallback'] = `${originalModel} -> ${model}`;
-          }
-          if (queueAttempt > 0) {
-            responseHeaders['x-proxy-queued'] = String(queueAttempt);
-          }
-
-          res.writeHead(proxyRes.statusCode, responseHeaders);
-          proxyRes.pipe(res);
-          return;
-
+          log('warn', `OpenAI error ${result.statusCode}`, { key: keyId, model: openaiTargetModel });
         } catch (err) {
           lastError = err;
-          log('error', 'Proxy request failed', {
-            key: keyId, model, error: err.message
+          log('error', 'OpenAI request failed', {
+            key: keyId, model: openaiTargetModel, error: err.message
           });
           continue;
         }
+      }
+
+      if (advanceToNextModel) {
+        continue;
       }
     }
 
@@ -321,7 +438,7 @@ async function handleProxyRequest(req, res, profileName) {
     }
 
     // Find the shortest cooldown expiry across all keys/models
-    const waitMs = cooldown.getShortestWait(keyOrder, modelChain);
+    const waitMs = cooldown.getShortestWait(allPriorityKeyIds, [...modelChain, 'openai']);
     if (waitMs <= 0) break; // no active cooldowns — something else is wrong
 
     const maxRemaining = queueWaitMs - elapsed;
@@ -343,85 +460,7 @@ async function handleProxyRequest(req, res, profileName) {
     await new Promise(r => setTimeout(r, cappedWait));
   }
 
-  // ── All Claude retries and queue attempts exhausted — try OpenAI fallback ──
-  if (config.openaiModelFallback && parsedBody) {
-    const openaiKeyOrder = (profile.openaiKeyOrder || []).length > 0
-      ? profile.openaiKeyOrder
-      : Object.keys(config.openaiKeys || {});
-    const openaiBaseUrl = config.openaiBaseUrl || 'https://api.openai.com';
-    const mapping = config.openaiModelMapping || {};
-    const targetModel = mapping[originalModel] || mapping['*'] || originalModel;
-
-    for (const keyId of openaiKeyOrder) {
-      if (cooldown.isInCooldown(keyId, 'openai')) continue;
-
-      const keyEntry = config.openaiKeys[keyId];
-      if (!keyEntry?.token) continue;
-
-      try {
-        log('info', 'OpenAI fallback attempt', {
-          key: keyId, claudeModel: originalModel, openaiModel: targetModel,
-          profile: profileName
-        });
-
-        const result = await handleViaOpenAI(
-          parsedBody, targetModel, openaiBaseUrl, keyEntry.token, res
-        );
-
-        if (result.success) {
-          const latency = Date.now() - startTime;
-          metrics.recordSuccess(keyId, targetModel);
-          metrics.recordModelFallback();
-          metrics.addRecentRequest({
-            method: req.method,
-            path: req.url,
-            model: targetModel,
-            key: keyId,
-            status: 200,
-            latency,
-            fallback: `${originalModel} -> ${targetModel} (OpenAI)`,
-            provider: 'openai'
-          });
-          log('info', `OpenAI fallback SUCCESS: ${originalModel} -> ${targetModel}`, {
-            key: keyId, latency, profile: profileName
-          });
-          return;
-        }
-
-        // Handle OpenAI errors with cooldowns
-        if (result.statusCode === 429) {
-          const cd = cooldown.setCooldown(keyId, 'openai', result.retryAfter || 30, 60000);
-          metrics.recordRetry();
-          log('warn', 'OpenAI 429 rate limited', { key: keyId, model: targetModel });
-          continue;
-        }
-        if (result.statusCode === 401 || result.statusCode === 403) {
-          cooldown.setCooldown(keyId, null, 300, 300000);
-          log('warn', `OpenAI ${result.statusCode} auth error`, { key: keyId });
-          continue;
-        }
-        if (result.statusCode === 404) {
-          log('warn', 'OpenAI 404 — model not found', { key: keyId, model: targetModel });
-          continue;
-        }
-        // Other errors
-        log('warn', `OpenAI error ${result.statusCode}`, { key: keyId, model: targetModel });
-        continue;
-
-      } catch (err) {
-        log('error', 'OpenAI fallback request failed', {
-          key: keyId, model: targetModel, error: err.message
-        });
-        continue;
-      }
-    }
-
-    log('warn', 'OpenAI fallback exhausted — all OpenAI keys failed', {
-      profile: profileName, model: originalModel
-    });
-  }
-
-  // ── All retries exhausted (Claude + OpenAI) ──
+  // ── All retries exhausted across the unified provider priority list ──
   metrics.recordFailure();
   const latency = Date.now() - startTime;
 
@@ -436,7 +475,7 @@ async function handleProxyRequest(req, res, profileName) {
     error: lastServerErrorStatus ? 'server_error_retries_exhausted' : 'all_keys_exhausted',
     queued: queueAttempt > 0 ? queueAttempt : undefined,
     queueTime: queueAttempt > 0 ? latency : undefined,
-    provider: 'anthropic'
+    provider: 'mixed'
   });
 
   // If we exhausted retries due to server errors, return 502 (not 429)
@@ -476,7 +515,7 @@ async function handleProxyRequest(req, res, profileName) {
     type: 'error',
     error: {
       type: 'rate_limit_error',
-      message: `Proxy: all ${Object.keys(config.keys).length} keys exhausted across models [${modelChain.join(', ')}] after ${queueAttempt} queue attempt(s) over ${Math.ceil(latency / 1000)}s. Active cooldowns: ${Object.keys(cooldown.getActiveCooldowns()).length}.`
+      message: `Proxy: all ${priorityItems.length} provider slots exhausted across models [${modelChain.join(', ')}] after ${queueAttempt} queue attempt(s) over ${Math.ceil(latency / 1000)}s. Active cooldowns: ${Object.keys(cooldown.getActiveCooldowns()).length}.`
     }
   }));
 }

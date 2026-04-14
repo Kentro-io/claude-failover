@@ -11,6 +11,7 @@ const cooldown = require('./cooldown');
 const metrics = require('./metrics');
 const { detectTools, setupShell, setupClaudeCode, setupCursor } = require('./setup');
 const { installLaunchAgent, uninstallLaunchAgent, writePid } = require('./daemon');
+const { buildPriorityOrder, splitPriorityOrder, toPriorityItems, encodePriorityItem } = require('./profile-order');
 
 const DASHBOARD_DIR = path.join(__dirname, '..', 'dashboard');
 const MIME_TYPES = {
@@ -68,6 +69,18 @@ function sendJSON(res, status, data) {
 function maskToken(token) {
   if (!token || token.length < 12) return '***';
   return token.slice(0, 10) + '...' + token.slice(-4);
+}
+
+function applyProfilePriority(profile, priorityOrder) {
+  const next = splitPriorityOrder(priorityOrder);
+  profile.priorityOrder = next.priorityOrder;
+  profile.keyOrder = next.keyOrder;
+  profile.openaiKeyOrder = next.openaiKeyOrder;
+  return profile;
+}
+
+function ensureProfilePriority(profile, config) {
+  return applyProfilePriority(profile, buildPriorityOrder(profile, config)).priorityOrder;
 }
 
 function serveDashboard(req, res) {
@@ -238,11 +251,14 @@ async function handleAPI(req, res, profileName) {
       addedAt: new Date().toISOString()
     };
 
-    // Add to default profile keyOrder if not present
+    // Add to all profiles and preserve unified priority ordering
     for (const prof of Object.values(config.profiles)) {
-      if (!prof.keyOrder.includes(id)) {
-        prof.keyOrder.push(id);
+      const priorityOrder = buildPriorityOrder(prof, config);
+      const encoded = encodePriorityItem('anthropic', id);
+      if (!priorityOrder.includes(encoded)) {
+        priorityOrder.push(encoded);
       }
+      applyProfilePriority(prof, priorityOrder);
     }
 
     saveConfig(config);
@@ -263,7 +279,9 @@ async function handleAPI(req, res, profileName) {
 
     delete config.keys[id];
     for (const prof of Object.values(config.profiles)) {
-      prof.keyOrder = prof.keyOrder.filter(k => k !== id);
+      const priorityOrder = buildPriorityOrder(prof, config)
+        .filter(encoded => encoded !== encodePriorityItem('anthropic', id));
+      applyProfilePriority(prof, priorityOrder);
     }
 
     saveConfig(config);
@@ -302,7 +320,11 @@ async function handleAPI(req, res, profileName) {
       return;
     }
 
-    prof.keyOrder = body.keyOrder;
+    const openaiPart = (prof.openaiKeyOrder || []).map(id => encodePriorityItem('openai', id));
+    applyProfilePriority(prof, [
+      ...body.keyOrder.map(id => encodePriorityItem('anthropic', id)),
+      ...openaiPart
+    ]);
     saveConfig(config);
     log('info', `Key order updated for profile ${body.profile}`);
     sendJSON(res, 200, { success: true });
@@ -384,12 +406,14 @@ async function handleAPI(req, res, profileName) {
       addedAt: new Date().toISOString()
     };
 
-    // Add to all profiles' openaiKeyOrder
+    // Add to all profiles and preserve unified priority ordering
     for (const prof of Object.values(config.profiles)) {
-      if (!prof.openaiKeyOrder) prof.openaiKeyOrder = [];
-      if (!prof.openaiKeyOrder.includes(id)) {
-        prof.openaiKeyOrder.push(id);
+      const priorityOrder = buildPriorityOrder(prof, config);
+      const encoded = encodePriorityItem('openai', id);
+      if (!priorityOrder.includes(encoded)) {
+        priorityOrder.push(encoded);
       }
+      applyProfilePriority(prof, priorityOrder);
     }
 
     // Enable OpenAI fallback automatically when first key is added
@@ -415,9 +439,9 @@ async function handleAPI(req, res, profileName) {
 
     delete config.openaiKeys[id];
     for (const prof of Object.values(config.profiles)) {
-      if (prof.openaiKeyOrder) {
-        prof.openaiKeyOrder = prof.openaiKeyOrder.filter(k => k !== id);
-      }
+      const priorityOrder = buildPriorityOrder(prof, config)
+        .filter(encoded => encoded !== encodePriorityItem('openai', id));
+      applyProfilePriority(prof, priorityOrder);
     }
 
     saveConfig(config);
@@ -441,7 +465,11 @@ async function handleAPI(req, res, profileName) {
       return;
     }
 
-    prof.openaiKeyOrder = body.openaiKeyOrder;
+    const anthropicPart = (prof.keyOrder || []).map(id => encodePriorityItem('anthropic', id));
+    applyProfilePriority(prof, [
+      ...anthropicPart,
+      ...body.openaiKeyOrder.map(id => encodePriorityItem('openai', id))
+    ]);
     saveConfig(config);
     log('info', `OpenAI key order updated for profile ${body.profile}`);
     sendJSON(res, 200, { success: true });
@@ -449,14 +477,41 @@ async function handleAPI(req, res, profileName) {
     return;
   }
 
+  if (apiPath === '/api/profiles/priority' && method === 'PUT') {
+    const body = await parseBody(req);
+    if (!body?.profile || !Array.isArray(body?.priorityOrder)) {
+      sendJSON(res, 400, { error: 'Missing profile or priorityOrder' });
+      return;
+    }
+
+    const prof = config.profiles[body.profile];
+    if (!prof) {
+      sendJSON(res, 404, { error: 'Profile not found' });
+      return;
+    }
+
+    applyProfilePriority(prof, body.priorityOrder);
+    saveConfig(config);
+    log('info', `Unified priority order updated for profile ${body.profile}`);
+    sendJSON(res, 200, { success: true });
+    broadcast('config', { action: 'profile-priority-reordered', profile: body.profile });
+    return;
+  }
+
   // Profiles
   if (apiPath === '/api/profiles' && method === 'GET') {
-    const profiles = Object.entries(config.profiles).map(([name, p]) => ({
-      name,
-      port: p.port,
-      keyOrder: p.keyOrder,
-      openaiKeyOrder: p.openaiKeyOrder || []
-    }));
+    const profiles = Object.entries(config.profiles).map(([name, p]) => {
+      const priorityOrder = ensureProfilePriority(p, config);
+      return {
+        name,
+        port: p.port,
+        keyOrder: p.keyOrder,
+        openaiKeyOrder: p.openaiKeyOrder || [],
+        priorityOrder,
+        priorityItems: toPriorityItems(priorityOrder, config)
+      };
+    });
+    saveConfig(config);
     sendJSON(res, 200, { profiles });
     return;
   }
@@ -476,12 +531,14 @@ async function handleAPI(req, res, profileName) {
 
     config.profiles[name] = {
       port: parseInt(body.port, 10),
-      keyOrder: body.keyOrder || Object.keys(config.keys)
+      keyOrder: body.keyOrder || Object.keys(config.keys),
+      openaiKeyOrder: body.openaiKeyOrder || Object.keys(config.openaiKeys || {})
     };
 
+    const priorityOrder = ensureProfilePriority(config.profiles[name], config);
     saveConfig(config);
     log('info', `Profile created: ${name}`);
-    sendJSON(res, 201, { name, ...config.profiles[name] });
+    sendJSON(res, 201, { name, ...config.profiles[name], priorityOrder, priorityItems: toPriorityItems(priorityOrder, config) });
     broadcast('config', { action: 'profile-created', name });
     return;
   }
@@ -497,7 +554,13 @@ async function handleAPI(req, res, profileName) {
 
     const body = await parseBody(req);
     if (body.port) config.profiles[name].port = parseInt(body.port, 10);
-    if (body.keyOrder) config.profiles[name].keyOrder = body.keyOrder;
+    if (body.priorityOrder) {
+      applyProfilePriority(config.profiles[name], body.priorityOrder);
+    } else {
+      if (body.keyOrder) config.profiles[name].keyOrder = body.keyOrder;
+      if (body.openaiKeyOrder) config.profiles[name].openaiKeyOrder = body.openaiKeyOrder;
+      ensureProfilePriority(config.profiles[name], config);
+    }
 
     saveConfig(config);
     sendJSON(res, 200, { success: true });

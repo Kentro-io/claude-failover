@@ -587,7 +587,10 @@ function renderProfiles() {
 
   content.innerHTML = `
     <div class="flex-between mb-16">
-      <h1 class="page-title" style="margin-bottom:0">Profiles</h1>
+      <div>
+        <h1 class="page-title" style="margin-bottom:4px">Profiles</h1>
+        <div class="text-muted text-sm">One unified priority list per profile. Put OpenAI first if you want it used first.</div>
+      </div>
       <button class="btn btn-primary" onclick="showAddProfileModal()">+ Add Profile</button>
     </div>
 
@@ -596,46 +599,30 @@ function renderProfiles() {
         <div class="flex-between">
           <div>
             <div style="font-size:15px;font-weight:600;margin-bottom:4px">${escHtml(p.name)}</div>
-            <div class="text-muted text-sm">Port ${p.port} · ${p.keyOrder.length} <span class="provider-badge anthropic" style="font-size:9px;padding:1px 5px">Anthropic</span> + ${(p.openaiKeyOrder || []).length} <span class="provider-badge openai" style="font-size:9px;padding:1px 5px">OpenAI</span></div>
+            <div class="text-muted text-sm">Port ${p.port} · ${(p.priorityItems || []).length} total provider slot(s)</div>
           </div>
           <div class="flex gap-8">
             ${p.name !== 'default' ? `<button class="btn btn-sm btn-danger" onclick="deleteProfile('${escAttr(p.name)}')">Delete</button>` : ''}
           </div>
         </div>
-        <div class="profile-key-list mt-8" data-profile-name="${escAttr(p.name)}">
-          ${p.keyOrder.map((k, i) => `
-            <div class="profile-key-item" draggable="true" data-key-id="${escAttr(k)}" data-index="${i}">
+
+        <div style="margin-top:12px;margin-bottom:8px;font-size:13px;font-weight:600">Unified priority order</div>
+        <div class="profile-priority-list" data-profile-name="${escAttr(p.name)}">
+          ${(p.priorityItems || []).map((item, i) => `
+            <div class="profile-key-item" draggable="true" data-priority-item="${escAttr(item.encoded)}" data-index="${i}">
               <span class="drag-handle">⠿</span>
-              <span class="key-label">${escHtml(state.keys.find(x => x.id === k)?.label || k)}</span>
-              <span class="text-muted text-sm">${escHtml(k)}</span>
+              <span class="provider-badge ${escAttr(item.provider)}">${item.provider === 'openai' ? 'OpenAI' : 'Anthropic'}</span>
+              <span class="key-label">${escHtml(item.label || item.id)}</span>
+              <span class="text-muted text-sm">${escHtml(item.id)}</span>
             </div>
           `).join('')}
-          ${p.keyOrder.length === 0 ? '<div class="text-muted text-sm" style="padding:8px">(no keys)</div>' : ''}
-        </div>
-
-        <div style="margin-top:12px">
-          <div class="flex-between" style="margin-bottom:4px">
-            <div style="font-size:13px;font-weight:600"><span class="provider-badge openai">OpenAI</span> Key Priority</div>
-            <div class="text-muted text-sm">${(p.openaiKeyOrder || []).length} key(s)</div>
-          </div>
-          <div class="profile-openai-key-list" data-profile-name="${escAttr(p.name)}">
-            ${(p.openaiKeyOrder || []).map((k, i) => `
-              <div class="profile-key-item" draggable="true" data-key-id="${escAttr(k)}" data-index="${i}" data-provider="openai">
-                <span class="drag-handle">⠿</span>
-                <span class="provider-badge openai" style="font-size:9px;padding:1px 5px">OpenAI</span>
-                <span class="key-label">${escHtml(state.openaiKeys?.find(x => x.id === k)?.label || k)}</span>
-                <span class="text-muted text-sm">${escHtml(k)}</span>
-              </div>
-            `).join('')}
-            ${(p.openaiKeyOrder || []).length === 0 ? '<div class="text-muted text-sm" style="padding:8px">(no OpenAI keys — add via Keys page)</div>' : ''}
-          </div>
+          ${(p.priorityItems || []).length === 0 ? '<div class="text-muted text-sm" style="padding:8px">(no keys in this profile yet)</div>' : ''}
         </div>
       </div>
     `).join('')}
   `;
 
-  // Setup drag-and-drop for each profile's key list
-  document.querySelectorAll('.profile-key-list').forEach(list => {
+  document.querySelectorAll('.profile-priority-list').forEach(list => {
     const profileName = list.dataset.profileName;
     let dragItem = null;
 
@@ -658,43 +645,14 @@ function renderProfiles() {
         e.preventDefault();
         item.classList.remove('drag-over');
         if (!dragItem || dragItem === item) return;
-        // Reorder DOM
         const items = [...list.querySelectorAll('.profile-key-item')];
         const fromIdx = items.indexOf(dragItem);
         const toIdx = items.indexOf(item);
         if (fromIdx < toIdx) item.after(dragItem);
         else item.before(dragItem);
-        // Save new order
-        const newOrder = [...list.querySelectorAll('.profile-key-item')].map(i => i.dataset.keyId);
-        await api('/api/keys/reorder', { method: 'PUT', body: { profile: profileName, keyOrder: newOrder } });
-        toast('Key order updated', 'success');
-        loadProfiles();
-      });
-    });
-  });
-
-  // Setup drag-and-drop for OpenAI key lists in profiles
-  document.querySelectorAll('.profile-openai-key-list').forEach(list => {
-    const profileName = list.dataset.profileName;
-    let dragItem = null;
-
-    list.querySelectorAll('.profile-key-item').forEach(item => {
-      item.addEventListener('dragstart', () => { dragItem = item; item.classList.add('dragging'); });
-      item.addEventListener('dragend', () => { item.classList.remove('dragging'); list.querySelectorAll('.profile-key-item').forEach(i => i.classList.remove('drag-over')); dragItem = null; });
-      item.addEventListener('dragover', (e) => { e.preventDefault(); if (item !== dragItem) item.classList.add('drag-over'); });
-      item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
-      item.addEventListener('drop', async (e) => {
-        e.preventDefault();
-        item.classList.remove('drag-over');
-        if (!dragItem || dragItem === item) return;
-        const items = [...list.querySelectorAll('.profile-key-item')];
-        const fromIdx = items.indexOf(dragItem);
-        const toIdx = items.indexOf(item);
-        if (fromIdx < toIdx) item.after(dragItem);
-        else item.before(dragItem);
-        const newOrder = [...list.querySelectorAll('.profile-key-item')].map(i => i.dataset.keyId);
-        await api('/api/openai-keys/reorder', { method: 'PUT', body: { profile: profileName, openaiKeyOrder: newOrder } });
-        toast('OpenAI key order updated', 'success');
+        const priorityOrder = [...list.querySelectorAll('.profile-key-item')].map(i => i.dataset.priorityItem);
+        await api('/api/profiles/priority', { method: 'PUT', body: { profile: profileName, priorityOrder } });
+        toast('Priority updated', 'success');
         loadProfiles();
       });
     });

@@ -14,16 +14,18 @@ const DEFAULT_CONFIG = {
     default: {
       port: 4080,
       keyOrder: [],
-      openaiKeyOrder: []
+      openaiKeyOrder: [],
+      priorityOrder: []
     }
   },
   keys: {},
   openaiKeys: {},
   openaiBaseUrl: 'https://api.openai.com',
   openaiModelMapping: {
-    'claude-opus-4-6': 'gpt-4.1',
-    'claude-sonnet-4-6': 'gpt-4.1-mini',
-    'claude-haiku-4-5-20251001': 'gpt-4.1-nano'
+    'claude-opus-4-6': 'gpt-5.4',
+    'claude-sonnet-4-6': 'gpt-5.4-mini',
+    'claude-haiku-4-5-20251001': 'gpt-5.4-nano',
+    '*': 'gpt-5.4'
   },
   openaiModelFallback: false,
   modelFallback: {

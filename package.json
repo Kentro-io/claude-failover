@@ -8,7 +8,8 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node bin/cli.js start"
+    "dev": "node bin/cli.js start",
+    "test": "node test/profile-order.test.js"
   },
   "keywords": [
     "anthropic",
