@@ -91,6 +91,30 @@ function getLaunchAgentPath() {
   return path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.claude-failover.plist');
 }
 
+function getAutostartStatus() {
+  const plistPath = getLaunchAgentPath();
+  const installed = fs.existsSync(plistPath);
+  let loaded = false;
+
+  if (installed) {
+    try {
+      execSync('launchctl list com.claude-failover', { stdio: 'pipe' });
+      loaded = true;
+    } catch {
+      loaded = false;
+    }
+  }
+
+  const daemon = getDaemonStatus();
+  return {
+    installed,
+    loaded,
+    running: daemon.running,
+    pid: daemon.pid,
+    path: plistPath
+  };
+}
+
 function installLaunchAgent() {
   const plistPath = getLaunchAgentPath();
   const cliPath = path.resolve(__dirname, '..', 'bin', 'cli.js');
@@ -160,5 +184,6 @@ module.exports = {
   stopDaemon,
   installLaunchAgent,
   uninstallLaunchAgent,
-  getLaunchAgentPath
+  getLaunchAgentPath,
+  getAutostartStatus
 };

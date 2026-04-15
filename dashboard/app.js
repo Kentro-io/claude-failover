@@ -19,6 +19,7 @@ const content = document.getElementById('content');
 const toastContainer = document.createElement('div');
 toastContainer.className = 'toast-container';
 document.body.appendChild(toastContainer);
+const VALID_PAGES = new Set(['status', 'keys', 'profiles', 'fallback', 'setup', 'logs']);
 
 // ─── SSE Connection ──────────────────────────────────────────────────────────
 
@@ -141,15 +142,41 @@ function toast(msg, type = 'info') {
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
 
+function pagePath(page) {
+  return `/dashboard/${page}`;
+}
+
+function pageFromLocation() {
+  const path = window.location.pathname.replace(/^\/dashboard\/?/, '').replace(/\/+$/, '');
+  if (!path || path === 'index.html') return 'status';
+  return VALID_PAGES.has(path) ? path : 'status';
+}
+
+function updateDocumentTitle(page) {
+  const label = page.charAt(0).toUpperCase() + page.slice(1);
+  document.title = `Claude Failover — ${label}`;
+}
+
 document.querySelectorAll('.nav-item').forEach(item => {
-  item.addEventListener('click', () => {
+  item.addEventListener('click', (e) => {
+    e.preventDefault();
     const page = item.dataset.page;
-    navigateTo(page);
+    navigateTo(page, { push: true });
   });
 });
 
-function navigateTo(page) {
+window.addEventListener('popstate', () => {
+  navigateTo(pageFromLocation(), { push: false });
+});
+
+function navigateTo(page, opts = {}) {
+  const { push = false } = opts;
+  page = VALID_PAGES.has(page) ? page : 'status';
   state.currentPage = page;
+  if (push && window.location.pathname !== pagePath(page)) {
+    window.history.pushState({ page }, '', pagePath(page));
+  }
+  updateDocumentTitle(page);
   document.querySelectorAll('.nav-item').forEach(i => {
     i.classList.toggle('active', i.dataset.page === page);
   });
@@ -333,12 +360,12 @@ function renderKeys() {
   const openaiKeys = state.openaiKeys || [];
   let openaiHtml = `
     <div class="flex-between mb-16 mt-16">
-      <h2 class="page-title" style="margin-bottom:0;font-size:16px">OpenAI Keys (Cross-Provider Fallback)</h2>
+      <h2 class="page-title" style="margin-bottom:0;font-size:16px">OpenAI Keys</h2>
       <button class="btn btn-primary" onclick="showAddOpenAIKeyModal()">+ Add OpenAI Key</button>
     </div>
   `;
   if (openaiKeys.length === 0) {
-    openaiHtml += '<div class="empty-state"><div class="empty-state-text">No OpenAI keys configured. Add one to enable cross-provider fallback.</div></div>';
+    openaiHtml += '<div class="empty-state"><div class="empty-state-text">No OpenAI keys configured.</div></div>';
   } else {
     openaiHtml += '<div class="card"><div id="openaiKeyList">' +
       openaiKeys.map((k, i) => renderOpenAIKeyItem(k, i)).join('') +
@@ -516,6 +543,7 @@ function renderOpenAIKeyItem(k, index) {
         </div>
       </div>
       <div class="key-actions">
+        <button class="btn btn-sm" onclick="testOpenAIKey('${escAttr(k.id)}')" id="test-openai-${escAttr(k.id)}">Test</button>
         <button class="btn btn-sm btn-danger" onclick="removeOpenAIKey('${escAttr(k.id)}')">Remove</button>
       </div>
     </div>
@@ -578,6 +606,26 @@ async function removeOpenAIKey(id) {
   await api(`/api/openai-keys/${encodeURIComponent(id)}`, { method: 'DELETE' });
   toast('OpenAI key removed', 'success');
   loadOpenAIKeys();
+}
+
+async function testOpenAIKey(id) {
+  const btn = document.getElementById(`test-openai-${id}`);
+  if (btn) { btn.textContent = '...'; btn.disabled = true; }
+
+  const result = await api(`/api/openai-keys/${encodeURIComponent(id)}/test`, { method: 'POST' });
+
+  if (result.valid) {
+    toast(`OpenAI key "${id}" is valid${result.note ? `, ${result.note.toLowerCase()}` : ''}`, 'success');
+    if (btn) btn.textContent = '✓';
+  } else {
+    const detail = result.code ? `${result.error || 'Invalid'} (${result.code})` : (result.error || 'Invalid');
+    toast(`OpenAI key "${id}" failed: ${detail}`, 'error');
+    if (btn) btn.textContent = '✗';
+  }
+
+  setTimeout(() => {
+    if (btn) { btn.textContent = 'Test'; btn.disabled = false; }
+  }, 2500);
 }
 
 // ─── Render: Profiles ────────────────────────────────────────────────────────
@@ -1032,10 +1080,16 @@ function renderSetup() {
     { key: 'claude-code', name: 'Claude Code', desc: 'Configure Claude Code settings' },
     { key: 'cursor', name: 'Cursor', desc: 'Configure Cursor settings' }
   ];
+  const autostart = tools.autostart || {};
 
   content.innerHTML = `
-    <h1 class="page-title">Auto-Setup</h1>
-    <p class="text-muted mb-16">Configure your tools to use the proxy automatically.</p>
+    <div class="flex-between mb-16">
+      <div>
+        <h1 class="page-title" style="margin-bottom:4px">Auto-Setup</h1>
+        <p class="text-muted">Configure detected tools automatically. Missing items are the only ones that will be changed.</p>
+      </div>
+      <button class="btn btn-primary" onclick="runSetup('auto')">Auto-configure Missing</button>
+    </div>
 
     ${items.map(item => {
       const tool = tools[item.key];
@@ -1071,8 +1125,15 @@ function renderSetup() {
         </div>
       </div>
       <div class="flex gap-8">
-        <button class="btn btn-sm btn-primary" onclick="runSetup('autostart')">Install</button>
-        <button class="btn btn-sm btn-danger" onclick="runSetup('remove-autostart')">Remove</button>
+        ${autostart.installed
+          ? `<span class="badge badge-green">Installed${autostart.loaded ? ' · active' : ''}</span>`
+          : '<span class="badge badge-amber">Not installed</span>'}
+        ${!autostart.installed || !autostart.loaded
+          ? '<button class="btn btn-sm btn-primary" onclick="runSetup(\'autostart\')">Install</button>'
+          : ''}
+        ${autostart.installed
+          ? '<button class="btn btn-sm btn-danger" onclick="runSetup(\'remove-autostart\')">Remove</button>'
+          : ''}
       </div>
     </div>
 
@@ -1090,7 +1151,7 @@ function renderSetup() {
 async function runSetup(target) {
   const result = await api(`/api/setup/${target}`, { method: 'POST' });
   if (result.success) {
-    toast(`${target} configured successfully`, 'success');
+    toast(result.message || `${target} configured successfully`, 'success');
     loadSetupStatus();
   } else {
     toast(result.message || result.error || 'Setup failed', 'error');
@@ -1232,4 +1293,4 @@ function requestInfoBadges(r) {
 // ─── Init ────────────────────────────────────────────────────────────────────
 
 connectSSE();
-navigateTo('status');
+navigateTo(pageFromLocation(), { push: false });

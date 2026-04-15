@@ -10,7 +10,7 @@ const { handleProxyRequest } = require('./proxy');
 const cooldown = require('./cooldown');
 const metrics = require('./metrics');
 const { detectTools, setupShell, setupClaudeCode, setupCursor } = require('./setup');
-const { installLaunchAgent, uninstallLaunchAgent, writePid } = require('./daemon');
+const { installLaunchAgent, uninstallLaunchAgent, writePid, getAutostartStatus } = require('./daemon');
 const { buildPriorityOrder, splitPriorityOrder, toPriorityItems, encodePriorityItem } = require('./profile-order');
 
 const DASHBOARD_DIR = path.join(__dirname, '..', 'dashboard');
@@ -87,7 +87,7 @@ function serveDashboard(req, res) {
   let filePath = req.url.replace('/dashboard', '') || '/';
   if (filePath === '/' || filePath === '') filePath = '/index.html';
 
-  const fullPath = path.join(DASHBOARD_DIR, filePath);
+  let fullPath = path.join(DASHBOARD_DIR, filePath);
   const ext = path.extname(fullPath);
 
   // Prevent directory traversal
@@ -97,10 +97,15 @@ function serveDashboard(req, res) {
     return;
   }
 
+  // Support routed SPA pages like /dashboard/status or /dashboard/profiles
+  if (!ext && !fs.existsSync(fullPath)) {
+    fullPath = path.join(DASHBOARD_DIR, 'index.html');
+  }
+
   try {
     const content = fs.readFileSync(fullPath);
     res.writeHead(200, {
-      'Content-Type': MIME_TYPES[ext] || 'application/octet-stream',
+      'Content-Type': MIME_TYPES[path.extname(fullPath)] || 'application/octet-stream',
       'Cache-Control': 'no-cache'
     });
     res.end(content);
@@ -146,7 +151,6 @@ function testApiKey(token) {
         if (res.statusCode === 200 || res.statusCode === 201) {
           resolve({ valid: true, status: res.statusCode });
         } else if (res.statusCode === 429) {
-          // Key is valid but rate limited
           resolve({ valid: true, status: res.statusCode, note: 'Rate limited but key is valid' });
         } else {
           resolve({ valid: false, status: res.statusCode, error: data });
@@ -161,6 +165,61 @@ function testApiKey(token) {
     req.on('timeout', () => {
       req.destroy();
       resolve({ valid: false, error: 'Timeout' });
+    });
+
+    req.write(body);
+    req.end();
+  });
+}
+
+function testOpenAIKey(token, model = 'gpt-5.4-mini') {
+  return new Promise((resolve) => {
+    const body = JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: 'Hi' }],
+      max_completion_tokens: 8
+    });
+
+    const req = https.request({
+      hostname: 'api.openai.com',
+      port: 443,
+      path: '/v1/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+        'Content-Length': Buffer.byteLength(body)
+      },
+      timeout: 15000
+    }, (res) => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => {
+        let parsed = null;
+        try { parsed = JSON.parse(data); } catch {}
+        const err = parsed?.error || {};
+
+        if (res.statusCode === 200 || res.statusCode === 201) {
+          resolve({ valid: true, status: res.statusCode, model });
+        } else if (res.statusCode === 429) {
+          resolve({ valid: true, status: res.statusCode, model, note: 'Rate limited but token is valid' });
+        } else {
+          resolve({
+            valid: false,
+            status: res.statusCode,
+            model,
+            error: err.message || data,
+            code: err.code || null,
+            type: err.type || null
+          });
+        }
+      });
+    });
+
+    req.on('error', (err) => resolve({ valid: false, error: err.message, model }));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ valid: false, error: 'Timeout', model });
     });
 
     req.write(body);
@@ -332,26 +391,6 @@ async function handleAPI(req, res, profileName) {
     return;
   }
 
-  // OpenAI key reorder
-  if (apiPath === '/api/openai-keys/reorder' && method === 'PUT') {
-    const body = await parseBody(req);
-    if (!body?.profile || !Array.isArray(body?.openaiKeyOrder)) {
-      sendJSON(res, 400, { error: 'Missing profile or openaiKeyOrder' });
-      return;
-    }
-    const prof = config.profiles[body.profile];
-    if (!prof) {
-      sendJSON(res, 404, { error: 'Profile not found' });
-      return;
-    }
-    prof.openaiKeyOrder = body.openaiKeyOrder;
-    saveConfig(config);
-    log('info', `OpenAI key order updated for profile ${body.profile}`);
-    sendJSON(res, 200, { success: true });
-    broadcast('config', { action: 'openai-keys-reordered', profile: body.profile });
-    return;
-  }
-
   // OpenAI Keys
   if (apiPath === '/api/openai-keys' && method === 'GET') {
     const openaiKeys = config.openaiKeys || {};
@@ -425,6 +464,24 @@ async function handleAPI(req, res, profileName) {
     log('info', `OpenAI key added: ${id} (${label})`);
     sendJSON(res, 201, { id, label, type, masked: maskToken(token) });
     broadcast('config', { action: 'openai-key-added', id });
+    return;
+  }
+
+  // Test OpenAI key
+  const testOpenAIKeyMatch = apiPath.match(/^\/api\/openai-keys\/([^/]+)\/test$/);
+  if (testOpenAIKeyMatch && method === 'POST') {
+    const id = decodeURIComponent(testOpenAIKeyMatch[1]);
+    const keyEntry = config.openaiKeys?.[id];
+    if (!keyEntry) {
+      sendJSON(res, 404, { error: 'OpenAI key not found' });
+      return;
+    }
+
+    const targetModel = config.openaiModelMapping?.['claude-sonnet-4-6']
+      || config.openaiModelMapping?.['*']
+      || 'gpt-5.4-mini';
+    const result = await testOpenAIKey(keyEntry.token, targetModel);
+    sendJSON(res, 200, { id, ...result });
     return;
   }
 
@@ -639,7 +696,10 @@ async function handleAPI(req, res, profileName) {
 
   // Setup
   if (apiPath === '/api/setup/status' && method === 'GET') {
-    sendJSON(res, 200, detectTools());
+    sendJSON(res, 200, {
+      ...detectTools(),
+      autostart: getAutostartStatus()
+    });
     return;
   }
 
@@ -668,6 +728,18 @@ async function handleAPI(req, res, profileName) {
       case 'remove-autostart':
         result = uninstallLaunchAgent();
         break;
+      case 'auto': {
+        const status = detectTools();
+        const actions = [];
+        if (status.zsh?.installed && !status.zsh?.configured) actions.push({ target: 'zsh', ...setupShell(port, 'zsh') });
+        if (status.bash?.installed && !status.bash?.configured) actions.push({ target: 'bash', ...setupShell(port, 'bash') });
+        if (status['claude-code']?.installed && !status['claude-code']?.configured) actions.push({ target: 'claude-code', ...setupClaudeCode(port) });
+        if (status.cursor?.installed && !status.cursor?.configured) actions.push({ target: 'cursor', ...setupCursor(port) });
+        const autostart = getAutostartStatus();
+        if (!autostart.installed || !autostart.loaded) actions.push({ target: 'autostart', ...installLaunchAgent() });
+        result = { success: true, actions, changed: actions.length, message: actions.length ? `Configured ${actions.length} item(s)` : 'Everything already configured' };
+        break;
+      }
       default:
         sendJSON(res, 400, { error: `Unknown target: ${target}` });
         return;
