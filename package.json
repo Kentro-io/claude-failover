@@ -9,7 +9,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node bin/cli.js start",
-    "test": "node test/profile-order.test.js"
+    "test": "node test/profile-order.test.js && node test/codex-oauth.test.js"
   },
   "keywords": [
     "anthropic",

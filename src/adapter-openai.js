@@ -4,6 +4,7 @@ const https = require('https');
 const http = require('http');
 const { URL } = require('url');
 const { log } = require('./logger');
+const { handleViaCodexOAuth } = require('./adapter-codex');
 
 /**
  * OpenAI Adapter — translates between Anthropic Messages API and OpenAI Chat Completions API.
@@ -508,6 +509,10 @@ function readResponseBody(res) {
  * @returns {Promise<{success: boolean, statusCode?: number}>}
  */
 async function handleViaOpenAI(parsedBody, targetModel, baseUrl, token, clientRes) {
+  if (typeof token === 'string' && token.startsWith('eyJ')) {
+    return handleViaCodexOAuth(parsedBody, targetModel, token, clientRes);
+  }
+
   const openaiPayload = translateRequest(parsedBody, targetModel);
   const isStreaming = openaiPayload.stream;
 

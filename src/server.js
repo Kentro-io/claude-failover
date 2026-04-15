@@ -12,6 +12,7 @@ const metrics = require('./metrics');
 const { detectTools, setupShell, setupClaudeCode, setupCursor } = require('./setup');
 const { installLaunchAgent, uninstallLaunchAgent, writePid, getAutostartStatus } = require('./daemon');
 const { buildPriorityOrder, splitPriorityOrder, toPriorityItems, encodePriorityItem } = require('./profile-order');
+const { testCodexOAuthToken } = require('./adapter-codex');
 
 const DASHBOARD_DIR = path.join(__dirname, '..', 'dashboard');
 const MIME_TYPES = {
@@ -173,6 +174,10 @@ function testApiKey(token) {
 }
 
 function testOpenAIKey(token, model = 'gpt-5.4-mini') {
+  if (typeof token === 'string' && token.startsWith('eyJ')) {
+    return testCodexOAuthToken(token, model);
+  }
+
   return new Promise((resolve) => {
     const body = JSON.stringify({
       model,
