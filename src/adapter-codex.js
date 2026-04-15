@@ -56,9 +56,10 @@ function getChatGPTAccountIdFromToken(token) {
   return payload?.['https://api.openai.com/auth']?.chatgpt_account_id || null;
 }
 
-function anthropicBlockToCodexContent(blocks) {
+function anthropicBlockToCodexContent(role, blocks) {
   const text = normalizeContent(blocks);
-  return [{ type: 'input_text', text }];
+  const type = role === 'assistant' ? 'output_text' : 'input_text';
+  return [{ type, text }];
 }
 
 function translateAnthropicToCodexRequest(anthropicBody, targetModel) {
@@ -75,8 +76,11 @@ function translateAnthropicToCodexRequest(anthropicBody, targetModel) {
   const input = [];
   for (const msg of anthropicBody.messages || []) {
     const content = Array.isArray(msg.content)
-      ? anthropicBlockToCodexContent(msg.content)
-      : [{ type: 'input_text', text: typeof msg.content === 'string' ? msg.content : String(msg.content || '') }];
+      ? anthropicBlockToCodexContent(msg.role, msg.content)
+      : [{
+          type: msg.role === 'assistant' ? 'output_text' : 'input_text',
+          text: typeof msg.content === 'string' ? msg.content : String(msg.content || '')
+        }];
     input.push({ type: 'message', role: msg.role, content });
   }
 

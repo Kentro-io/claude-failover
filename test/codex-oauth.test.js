@@ -49,6 +49,8 @@ test('translates anthropic body into codex responses request', () => {
   assert.equal(result.store, false);
   assert.equal(result.input.length, 2);
   assert.equal(result.input[0].role, 'user');
+  assert.equal(result.input[0].content[0].type, 'input_text');
   assert.equal(result.input[0].content[0].text, 'Hello');
+  assert.equal(result.input[1].content[0].type, 'output_text');
   assert.equal(result.tools[0].name, 'lookup_weather');
 });
